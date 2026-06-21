@@ -3,9 +3,11 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass
 
-from floppy_backend.models import AudioAsset, AudioAssetIn, AudioScript, GenerationJobCreateResponse, GenerationRequest, GenerationResponse, NormalizedAudioRequest
+from floppy_backend.config import Settings
+from floppy_backend.models import AssetSearchRequest, AudioAsset, AudioAssetIn, AudioScript, EventIn, GenerationJobCreateResponse, GenerationRequest, GenerationResponse, NormalizedAudioRequest
 from floppy_backend.providers.audio import AudioGenerationProvider, GeneratedAudio
 from floppy_backend.repositories import Repository
+from floppy_backend.services import script_guard
 from floppy_backend.services.normalizer import RequestNormalizer
 from floppy_backend.services.recommendation import RecommendationService
 from floppy_backend.services.script import SleepScriptService
@@ -22,6 +24,10 @@ class PreparedGeneration:
     script: AudioScript | None = None
 
 
+class BudgetExceededError(RuntimeError):
+    pass
+
+
 class GenerationService:
     def __init__(
         self,
@@ -31,6 +37,7 @@ class GenerationService:
         normalizer: RequestNormalizer,
         recommendation_service: RecommendationService,
         script_service: SleepScriptService,
+        settings: Settings | None = None,
     ):
         self.repository = repository
         self.storage = storage
@@ -38,6 +45,16 @@ class GenerationService:
         self.normalizer = normalizer
         self.recommendation_service = recommendation_service
         self.script_service = script_service
+        self._settings = settings
+
+    def check_generation_budget(self, user_id: str) -> None:
+        if self._settings is None:
+            return
+        used_chars, used_count = self.repository.generation_usage_since(user_id, hours=24)
+        if used_chars >= self._settings.daily_char_budget:
+            raise BudgetExceededError(f"daily character budget exceeded: {used_chars}/{self._settings.daily_char_budget}")
+        if used_count >= self._settings.daily_generate_count:
+            raise BudgetExceededError(f"daily generation count exceeded: {used_count}/{self._settings.daily_generate_count}")
 
     def generate_or_match(self, user_id: str, request: GenerationRequest) -> GenerationResponse:
         prepared = self.prepare(user_id, request)
@@ -61,6 +78,7 @@ class GenerationService:
                 normalized_request=prepared.normalized,
             )
 
+        self.check_generation_budget(user_id)
         job_id = self.repository.create_generation_job(
             user_id=user_id,
             request_text=request.request_text,
@@ -113,6 +131,7 @@ class GenerationService:
                 normalized_request=prepared.normalized,
             )
 
+        self.check_generation_budget(user_id)
         job, claimed = self.repository.claim_generation_job(
             user_id=user_id,
             request_text=request.request_text,
@@ -151,22 +170,36 @@ class GenerationService:
         cache_key = sha256_json(normalized.model_dump(mode="json"))
 
         if allow_cache and not request.force_generate:
-            exact = self.repository.get_asset_by_prompt_hash(cache_key)
-            if exact:
-                exact.playback_url = self.storage.public_url(exact.object_key)
-                return PreparedGeneration(normalized=normalized, cache_key=cache_key, cached_asset=exact, match_type="exact")
-
-            nearest = self.recommendation_service.nearest(request.request_text, limit=1)
-            if nearest and nearest[0].score >= 0.58:
-                asset = nearest[0].asset
+            search = self.recommendation_service.search(
+                AssetSearchRequest(
+                    user_id=user_id,
+                    query=request.request_text,
+                    cache_key=cache_key,
+                    limit=1,
+                )
+            )
+            if search.hit and search.results:
+                result = search.results[0]
+                asset = result.asset
                 asset.playback_url = self.storage.public_url(asset.object_key)
-                return PreparedGeneration(normalized=normalized, cache_key=cache_key, cached_asset=asset, match_type="nearest")
+                self.repository.record_event(
+                    user_id,
+                    EventIn(
+                        event_type="recommendation_served",
+                        asset_id=asset.id,
+                        payload={"match_type": result.match_type, "score": result.score, "reasons": result.reasons},
+                    ),
+                )
+                return PreparedGeneration(normalized=normalized, cache_key=cache_key, cached_asset=asset, match_type=result.match_type)
 
         sleep_script = self.script_service.generate(normalized, profile)
         script = self.repository.upsert_audio_script(sleep_script.to_input(user_id))
         return PreparedGeneration(normalized=normalized, cache_key=cache_key, cached_asset=None, match_type="generated", script=script)
 
     def execute_generation(self, user_id: str, prepared: PreparedGeneration) -> tuple[AudioAsset, int, GeneratedAudio]:
+        if prepared.script and prepared.script.safety_status != "approved":
+            notes = ", ".join(prepared.script.safety_notes)
+            raise script_guard.ScriptGuardError(f"script guard rejected script: {prepared.script.safety_status}; {notes}")
         profile = self.repository.get_profile(user_id)
         started = time.perf_counter()
         output_ext = "mp3" if self.provider.name == "minimax_t2a" else "wav"

@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from floppy_backend.models import AudioScriptIn, AudioType, NormalizedAudioRequest, UserProfile
+from floppy_backend.services import script_guard
 from floppy_backend.utils import sha256_text
 
 
@@ -125,6 +126,8 @@ class SleepScriptService:
                 ]
             )
         )
+        guard = script_guard.check(script_text, estimated)
+        notes: tuple[str, ...] = tuple(guard.all_notes) if guard.all_notes else ("low_stimulation", "no_medical_claim")
         return SleepScript(
             title=title,
             script_text=script_text,
@@ -133,7 +136,8 @@ class SleepScriptService:
             pause_density=pause_density,
             estimated_duration_sec=estimated,
             script_hash=script_hash,
-            safety_notes=("low_stimulation", "no_medical_claim"),
+            safety_status=guard.status,
+            safety_notes=notes,
         )
 
     def _estimate_duration(self, script_text: str) -> int:

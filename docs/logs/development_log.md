@@ -18,7 +18,7 @@
 ### 已完成
 
 1. 完成后端/算法调研文档。
-   - 文件：`docs/backend_algorithm_research.md`
+   - 文件：`docs/research/backend_algorithm_research.md`
    - 覆盖：音频资产库、缓存策略、用户画像、推荐算法、生成安全、Agent/工作流框架选型、风险和 MVP 路线。
 
 2. 搭建 FastAPI 后端 MVP。
@@ -148,7 +148,7 @@
 ### 已完成
 
 1. 新增 TTS 厂商调研文档。
-   - 文件：`docs/tts_vendor_research.md`
+   - 文件：`docs/research/tts_vendor_research.md`
 
 2. 覆盖候选厂商。
    - 第一轮 shortlist 收敛为：豆包/火山引擎、MiniMax、微软 Azure AI Speech。
@@ -179,7 +179,7 @@
 ### 已完成
 
 1. 新增 MiniMax 音频工作流设计文档。
-   - 文件：`docs/minimax_audio_workflow.md`
+   - 文件：`docs/research/minimax_audio_workflow.md`
 
 2. 明确 MiniMax 的定位。
    - MiniMax 作为 TTS/T2A provider，不作为全流程 Agent。
@@ -219,7 +219,7 @@
    - 解压到 `/tmp/floppy_asmr_skill` 后只读取文本和源码。
 
 2. 新增评审文档。
-   - 文件：`docs/asmr_ambient_skill_review.md`
+   - 文件：`docs/research/asmr_ambient_skill_review.md`
 
 3. 评估结论。
    - 该 skill 对 Floppy 很有参考价值。
@@ -249,7 +249,7 @@
 ### 已完成
 
 1. 新增 MiniMax 官网深度调研文档。
-   - 文件：`docs/minimax_official_deep_research.md`
+   - 文件：`docs/research/minimax_official_deep_research.md`
 
 2. 调研 MiniMax API Platform。
    - T2A HTTP：适合短文本、试听和 PoC。
@@ -265,7 +265,7 @@
    - 不建议照搬 MCP 工具、本地状态文件、多阶段人工确认、运行时下载 Pixabay 素材和本地预览服务器。
 
 4. 更新 MiniMax 音频工作流设计文档。
-   - 文件：`docs/minimax_audio_workflow.md`
+   - 文件：`docs/research/minimax_audio_workflow.md`
    - 补充官方接口限制、File API、Voice API、成本判断和 Hub workflow 取舍。
 
 ### 关键结论
@@ -382,3 +382,79 @@ MiniMax 只作为 TTS/T2A provider。Floppy 自己保留需求理解、脚本生
    - save to Floppy storage
    - update job provider metadata
 4. 建立 `tts_eval_runs`，沉淀评测结果。
+
+## 2026-06-21 MiniMax Chinese Host Smoke
+
+### 背景
+
+MiniMax 真实生成 smoke 已跑通，确认当前中文站 API Key 必须使用中文站 host。
+
+### 验证事实
+
+- 成功 provider：`minimax_t2a`
+- 成功 model：`speech-2.8-hd`
+- 成功 host：`https://api.minimaxi.com`
+- `usage_characters=661`
+- `estimated_cost_usd=0.0661`
+- `audio_content_type=audio/mpeg`
+- 英文站 `https://api.minimax.io` 对当前 key 返回 `invalid api key`。
+
+### 已完成
+
+1. 将默认 `FLOPPY_MINIMAX_BASE_URL` 调整为 `https://api.minimaxi.com`。
+2. 更新 README，明确中文站 API Key 必须配置：
+
+   ```bash
+   export FLOPPY_MINIMAX_BASE_URL="https://api.minimaxi.com"
+   ```
+
+3. MiniMax provider 在英文站 host 遇到 `invalid api key` 或 HTTP 401 时，会提示中文站 key 可能需要切到 `https://api.minimaxi.com`。
+4. 未在仓库写入任何 API Key。
+
+### 当前边界
+
+- MiniMax 商用、缓存、长期存储、CDN 分发和声音克隆授权仍需单独确认。
+- 真实 provider 成本和延迟需要继续沉淀到评测数据中。
+
+## 2026-06-21 Agent Tool Contract
+
+### 背景
+
+产品方向确认：Floppy 是 Agent 项目，后端是 Agent 的执行层，用户画像是 Agent 的决策上下文。需要在后端方案中明确 Agent 与后端的接口契约。
+
+### 已完成
+
+1. 新增 Agent Tool Contract 文档。
+   - 文件：`docs/contracts/agent_tool_contract.md`
+   - 覆盖：ProfileContext DTO、6 个后端工具定义、检索 vs 生成决策规则、安全/成本后端强制执行、与 algo 画像字段对齐原则。
+
+2. 定义 ProfileContext（Agent 画像上下文 DTO）。
+   - 包含：segment、algo_segment、mood_tags、tonight_mood、tonight_stress、generation_budget。
+   - 提供 `GET /users/{id}/profile/context` 接口。
+
+3. 定义 6 个 Agent 工具：
+   - `normalize_request` → `POST /normalize`
+   - `search_audio_assets` → `POST /assets/search`（返回 `hit` 字段，Agent 以此决定是否生成）
+   - `create_generation_job` → 现有接口（后端强制额度检查）
+   - `get_job_status` → 现有接口
+   - `record_event` → 现有接口（规范 payload schema）
+   - `update_profile_signal` → `POST /users/{id}/profile/checkin`
+
+4. 明确安全/成本限制后端强制执行，Agent 不可信调用。
+
+5. 明确与 algo 字段对齐规则：字段命名冲突以后端 contract 为准，algo segment 通过 `algo_segment` 独立列写入。
+
+### P0 落地改造清单
+
+1. `GET /users/{id}/profile/context`（含 `generation_budget`）
+2. `POST /normalize`
+3. `POST /assets/search`（返回 `hit` + `best_score`）
+4. `create_generation_job` 增加每日额度检查（429）
+5. `POST /users/{id}/profile/checkin`
+6. `user_profiles` 增加 `algo_segment`、`tonight_mood`、`tonight_stress`、`profile_version` 列
+
+### 下一步
+
+1. 实现 P0 改造清单中的 3 个新接口 + 1 个额度检查 + DB migration。
+2. 等算法同学确认 `ProfileContext` 字段后补全 `生成_budget` 口径和 `algo_segment` 枚举。
+3. 补充集成测试：Agent 工具链 happy path + 额度拒绝场景。

@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timedelta
 from threading import RLock
 
-from floppy_backend.models import AudioAsset, AudioAssetIn, AudioScript, AudioScriptIn, AudioType, EventIn, GenerationJob, UserProfile, UserProfileIn
+from floppy_backend.models import AudioAsset, AudioAssetIn, AudioScript, AudioScriptIn, AudioType, EventIn, GenerationJob, ProfileCheckinIn, UserProfile, UserProfileIn
 from floppy_backend.utils import dumps, loads, stable_id, utcnow
 
 
@@ -34,8 +34,8 @@ class Repository:
                 INSERT INTO user_profiles (
                     user_id, audio_type_preferences, voice_preferences, background_preferences,
                     duration_preference_min, stress_level, anxiety_level, avg_sleep_latency_min,
-                    mood_tags, segment, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    mood_tags, segment, profile_version, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
                 ON CONFLICT(user_id) DO UPDATE SET
                     audio_type_preferences=excluded.audio_type_preferences,
                     voice_preferences=excluded.voice_preferences,
@@ -46,6 +46,7 @@ class Repository:
                     avg_sleep_latency_min=excluded.avg_sleep_latency_min,
                     mood_tags=excluded.mood_tags,
                     segment=excluded.segment,
+                    profile_version=profile_version + 1,
                     updated_at=excluded.updated_at
                 """,
                 (
@@ -63,7 +64,10 @@ class Repository:
                 ),
             )
             self.conn.commit()
-        return UserProfile(user_id=user_id, segment=segment, updated_at=updated_at, **profile.model_dump())
+        existing = self.get_profile(user_id)
+        if existing is None:
+            raise RuntimeError("failed to read user profile after upsert")
+        return existing
 
     def get_profile(self, user_id: str) -> UserProfile | None:
         with self._lock:
@@ -81,8 +85,43 @@ class Repository:
             avg_sleep_latency_min=row["avg_sleep_latency_min"],
             mood_tags=loads(row["mood_tags"]),
             segment=row["segment"],
+            algo_segment=row["algo_segment"],
+            tonight_mood=row["tonight_mood"],
+            tonight_stress=row["tonight_stress"],
+            profile_version=row["profile_version"],
             updated_at=_dt(row["updated_at"]),
         )
+
+    def update_profile_checkin(self, user_id: str, checkin: ProfileCheckinIn) -> UserProfile:
+        self.ensure_user(user_id)
+        profile = self.get_profile(user_id)
+        if profile is None:
+            profile = self.upsert_profile(user_id, UserProfileIn(), "balanced_sleep")
+        now = utcnow()
+        with self._lock:
+            self.conn.execute(
+                """
+                UPDATE user_profiles
+                SET tonight_mood = COALESCE(?, tonight_mood),
+                    tonight_stress = COALESCE(?, tonight_stress),
+                    avg_sleep_latency_min = COALESCE(?, avg_sleep_latency_min),
+                    profile_version = profile_version + 1,
+                    updated_at = ?
+                WHERE user_id = ?
+                """,
+                (
+                    checkin.tonight_mood,
+                    checkin.tonight_stress.value if checkin.tonight_stress else None,
+                    checkin.sleep_latency_hint_min,
+                    now.isoformat(),
+                    user_id,
+                ),
+            )
+            self.conn.commit()
+        updated = self.get_profile(user_id)
+        if updated is None:
+            raise RuntimeError("failed to read user profile after checkin")
+        return updated
 
     def upsert_asset(self, asset: AudioAssetIn) -> AudioAsset:
         asset_id = stable_id(
@@ -99,9 +138,9 @@ class Repository:
                 """
                 INSERT INTO audio_assets (
                     id, type, title, object_key, duration_sec, language, voice_id, prompt_hash,
-                    content_hash, mood_tags, sleep_stage, user_segment_tags, safety_status,
+                    content_hash, mood_tags, tags, sleep_stage, user_segment_tags, safety_status,
                     quality_score, embedding, created_by, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
                     type=excluded.type,
                     title=excluded.title,
@@ -112,6 +151,7 @@ class Repository:
                     prompt_hash=excluded.prompt_hash,
                     content_hash=excluded.content_hash,
                     mood_tags=excluded.mood_tags,
+                    tags=excluded.tags,
                     sleep_stage=excluded.sleep_stage,
                     user_segment_tags=excluded.user_segment_tags,
                     safety_status=excluded.safety_status,
@@ -130,6 +170,7 @@ class Repository:
                     asset.prompt_hash,
                     asset.content_hash,
                     dumps(asset.mood_tags),
+                    dumps(asset.tags),
                     asset.sleep_stage,
                     dumps(asset.user_segment_tags),
                     asset.safety_status,
@@ -214,6 +255,15 @@ class Repository:
                 (limit,),
             ).fetchall()
         return [self._asset_from_row(row) for row in rows]
+
+    def list_available_tags(self) -> set[str]:
+        with self._lock:
+            rows = self.conn.execute("SELECT tags FROM audio_assets WHERE safety_status = 'approved'").fetchall()
+        tags: set[str] = set()
+        for row in rows:
+            if row["tags"]:
+                tags.update(loads(row["tags"]))
+        return tags
 
     def create_generation_job(
         self,
@@ -415,6 +465,24 @@ class Repository:
             self.conn.commit()
         return event_id
 
+    def generation_usage_since(self, user_id: str, *, hours: int = 24) -> tuple[int, int]:
+        since = (utcnow() - timedelta(hours=hours)).isoformat()
+        with self._lock:
+            row = self.conn.execute(
+                """
+                SELECT COALESCE(SUM(usage_characters), 0) AS chars,
+                       COUNT(*) AS count
+                FROM generation_jobs
+                WHERE user_id = ?
+                  AND status = 'succeeded'
+                  AND asset_id IS NOT NULL
+                  AND usage_characters IS NOT NULL
+                  AND created_at >= ?
+                """,
+                (user_id, since),
+            ).fetchone()
+        return int(row["chars"] or 0), int(row["count"] or 0)
+
     def _asset_from_row(self, row: sqlite3.Row) -> AudioAsset:
         return AudioAsset(
             id=row["id"],
@@ -427,6 +495,7 @@ class Repository:
             prompt_hash=row["prompt_hash"],
             content_hash=row["content_hash"],
             mood_tags=loads(row["mood_tags"]),
+            tags=loads(row["tags"]) if row["tags"] else [],
             sleep_stage=row["sleep_stage"],
             user_segment_tags=loads(row["user_segment_tags"]),
             safety_status=row["safety_status"],

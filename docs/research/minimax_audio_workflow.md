@@ -60,7 +60,7 @@ User Request
 - `https://platform.minimax.io/docs/api-reference/voice-management-get`
 - `https://platform.minimax.io/docs/guides/pricing-paygo`
 
-补充深度调研：`docs/minimax_official_deep_research.md`
+补充深度调研：`docs/research/minimax_official_deep_research.md`
 
 ## Hub Workflow 判断
 

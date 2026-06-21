@@ -174,7 +174,7 @@ class MiniMaxTTSProvider(AudioGenerationProvider):
         response = self._post_json("/v1/t2a_v2", payload)
         base_resp = response.get("base_resp") or {}
         if base_resp.get("status_code") not in (0, None):
-            raise ProviderAPIError(base_resp.get("status_msg") or "MiniMax T2A request failed", status_code=base_resp.get("status_code"))
+            self._raise_base_resp_error(base_resp, "MiniMax T2A request failed")
 
         audio_hex = ((response.get("data") or {}).get("audio") or "").strip()
         if not audio_hex:
@@ -216,7 +216,7 @@ class MiniMaxTTSProvider(AudioGenerationProvider):
         response = self._post_json("/v1/t2a_async_v2", payload)
         base_resp = response.get("base_resp") or {}
         if base_resp.get("status_code") not in (0, None):
-            raise ProviderAPIError(base_resp.get("status_msg") or "MiniMax async task creation failed", status_code=base_resp.get("status_code"))
+            self._raise_base_resp_error(base_resp, "MiniMax async task creation failed")
         task_id = str(response.get("task_id") or "")
         if not task_id:
             raise ProviderAPIError("MiniMax async response did not include task_id")
@@ -233,7 +233,7 @@ class MiniMaxTTSProvider(AudioGenerationProvider):
         response = self._get_json("/v1/query/t2a_async_query_v2", {"task_id": task_id})
         base_resp = response.get("base_resp") or {}
         if base_resp.get("status_code") not in (0, None):
-            raise ProviderAPIError(base_resp.get("status_msg") or "MiniMax async query failed", status_code=base_resp.get("status_code"))
+            self._raise_base_resp_error(base_resp, "MiniMax async query failed")
         file_id = response.get("file_id")
         return MiniMaxAsyncStatus(
             task_id=str(response.get("task_id") or task_id),
@@ -293,6 +293,13 @@ class MiniMaxTTSProvider(AudioGenerationProvider):
         price = self.COST_PER_MILLION_CHARS.get(model, 100.0)
         return round((usage_characters / 1_000_000) * price, 6)
 
+    def _raise_base_resp_error(self, base_resp: dict, fallback_message: str) -> None:
+        status_code = base_resp.get("status_code")
+        status_msg = base_resp.get("status_msg") or fallback_message
+        if "invalid api key" in status_msg.lower() and "minimax.io" in self.settings.minimax_base_url:
+            status_msg += " (hint: Chinese-account keys require FLOPPY_MINIMAX_BASE_URL=https://api.minimaxi.com)"
+        raise ProviderAPIError(status_msg, status_code=status_code)
+
     def _build_payload(self, text: str) -> dict:
         voice_setting = {
             "voice_id": self.settings.minimax_voice_id,
@@ -333,7 +340,10 @@ class MiniMaxTTSProvider(AudioGenerationProvider):
                 return json.loads(response.read().decode("utf-8"))
         except urllib.error.HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace")
-            raise ProviderAPIError(f"MiniMax HTTP {exc.code}: {detail}", status_code=exc.code) from exc
+            msg = f"MiniMax HTTP {exc.code}: {detail}"
+            if exc.code == 401 and "minimax.io" in self.settings.minimax_base_url:
+                msg += " (hint: Chinese-account keys require FLOPPY_MINIMAX_BASE_URL=https://api.minimaxi.com)"
+            raise ProviderAPIError(msg, status_code=exc.code) from exc
         except urllib.error.URLError as exc:
             raise ProviderAPIError(f"MiniMax request failed: {exc.reason}") from exc
 

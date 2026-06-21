@@ -23,6 +23,10 @@ CREATE TABLE IF NOT EXISTS user_profiles (
     avg_sleep_latency_min INTEGER NOT NULL,
     mood_tags TEXT NOT NULL,
     segment TEXT NOT NULL,
+    algo_segment TEXT,
+    tonight_mood TEXT,
+    tonight_stress TEXT,
+    profile_version INTEGER NOT NULL DEFAULT 1,
     updated_at TEXT NOT NULL
 );
 
@@ -37,6 +41,7 @@ CREATE TABLE IF NOT EXISTS audio_assets (
     prompt_hash TEXT NOT NULL,
     content_hash TEXT NOT NULL,
     mood_tags TEXT NOT NULL,
+    tags TEXT NOT NULL DEFAULT '[]',
     sleep_stage TEXT NOT NULL,
     user_segment_tags TEXT NOT NULL,
     safety_status TEXT NOT NULL,
@@ -128,8 +133,8 @@ def initialize(conn: sqlite3.Connection) -> None:
 
 
 def _migrate(conn: sqlite3.Connection) -> None:
-    columns = {row["name"] for row in conn.execute("PRAGMA table_info(generation_jobs)").fetchall()}
-    additions = {
+    job_cols = {row["name"] for row in conn.execute("PRAGMA table_info(generation_jobs)").fetchall()}
+    job_additions = {
         "script_id": "TEXT REFERENCES audio_scripts(id)",
         "script_hash": "TEXT",
         "script_chars": "INTEGER",
@@ -142,6 +147,21 @@ def _migrate(conn: sqlite3.Connection) -> None:
         "estimated_cost_usd": "REAL",
         "error_message": "TEXT",
     }
-    for column, definition in additions.items():
-        if column not in columns:
+    for column, definition in job_additions.items():
+        if column not in job_cols:
             conn.execute(f"ALTER TABLE generation_jobs ADD COLUMN {column} {definition}")
+
+    profile_cols = {row["name"] for row in conn.execute("PRAGMA table_info(user_profiles)").fetchall()}
+    profile_additions = {
+        "algo_segment": "TEXT",
+        "tonight_mood": "TEXT",
+        "tonight_stress": "TEXT",
+        "profile_version": "INTEGER NOT NULL DEFAULT 1",
+    }
+    for column, definition in profile_additions.items():
+        if column not in profile_cols:
+            conn.execute(f"ALTER TABLE user_profiles ADD COLUMN {column} {definition}")
+
+    asset_cols = {row["name"] for row in conn.execute("PRAGMA table_info(audio_assets)").fetchall()}
+    if "tags" not in asset_cols:
+        conn.execute("ALTER TABLE audio_assets ADD COLUMN tags TEXT NOT NULL DEFAULT '[]'")

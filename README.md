@@ -103,15 +103,19 @@ FLOPPY_AUDIO_PROVIDER=local uvicorn floppy_backend.main:app --reload
 ```bash
 export FLOPPY_AUDIO_PROVIDER=minimax
 export FLOPPY_MINIMAX_API_KEY="<your_key>"
+export FLOPPY_MINIMAX_BASE_URL="https://api.minimaxi.com"
 export FLOPPY_MINIMAX_MODEL="speech-2.8-hd"
 export FLOPPY_MINIMAX_VOICE_ID="Chinese (Mandarin)_Warm_Bestie"
 uvicorn floppy_backend.main:app --reload
 ```
 
+MiniMax 中文站 API Key 必须使用 `https://api.minimaxi.com`。如果误用英文站 `https://api.minimax.io`，当前 key 可能返回 `invalid api key`。
+
 MiniMax 快速验证：
 
 ```bash
 export FLOPPY_MINIMAX_API_KEY="<your_key>"
+export FLOPPY_MINIMAX_BASE_URL="https://api.minimaxi.com"
 .venv/bin/python scripts/minimax_smoke.py
 ```
 

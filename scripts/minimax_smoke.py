@@ -2,6 +2,11 @@ from __future__ import annotations
 
 import os
 import sys
+from datetime import datetime
+from pathlib import Path
+
+# Ensure repo root is importable when the script is run directly.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from fastapi.testclient import TestClient
 
@@ -10,6 +15,10 @@ from floppy_backend.main import app
 
 
 def main() -> int:
+    settings = get_settings()
+    if settings.minimax_api_key and not os.getenv("FLOPPY_MINIMAX_API_KEY"):
+        os.environ["FLOPPY_MINIMAX_API_KEY"] = settings.minimax_api_key
+
     required = ["FLOPPY_MINIMAX_API_KEY"]
     missing = [name for name in required if not os.getenv(name)]
     if missing:
@@ -19,7 +28,7 @@ def main() -> int:
     os.environ.setdefault("FLOPPY_AUDIO_PROVIDER", "minimax")
     os.environ.setdefault("FLOPPY_MINIMAX_MODEL", "speech-2.8-hd")
     os.environ.setdefault("FLOPPY_MINIMAX_VOICE_ID", "Chinese (Mandarin)_Warm_Bestie")
-    os.environ.setdefault("FLOPPY_DATABASE_PATH", "data/minimax_smoke.db")
+    os.environ.setdefault("FLOPPY_DATABASE_PATH", f"data/minimax_smoke_{datetime.now().strftime('%Y%m%d%H%M%S')}.db")
     os.environ.setdefault("FLOPPY_STORAGE_DIR", "storage/audio")
     get_settings.cache_clear()
 
@@ -41,7 +50,7 @@ def main() -> int:
             return 1
 
         request = {
-            "request_text": "请用温柔女声讲一个很短的海边雨夜睡前故事，轻柔雨声，5分钟",
+            "request_text": f"请用温柔女声讲一个很短的海边雨夜睡前故事，轻柔雨声，5分钟。实验编号{datetime.now().strftime('%H%M%S')}",
             "force_generate": True,
         }
         response = client.post("/users/u_minimax_smoke/generate-audio", json=request)

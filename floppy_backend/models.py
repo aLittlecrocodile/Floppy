@@ -36,7 +36,68 @@ class UserProfileIn(BaseModel):
 class UserProfile(UserProfileIn):
     user_id: str
     segment: str
+    algo_segment: str | None = None
+    tonight_mood: str | None = None
+    tonight_stress: ProfileLevel | None = None
+    profile_version: int = 1
     updated_at: datetime
+
+
+class ProfileCheckinIn(BaseModel):
+    tonight_mood: str | None = Field(default=None, max_length=80)
+    tonight_stress: ProfileLevel | None = None
+    sleep_latency_hint_min: int | None = Field(default=None, ge=0, le=180)
+
+
+class GenerationBudget(BaseModel):
+    daily_remaining_chars: int
+    daily_generate_count_remaining: int
+
+
+class ProfileContext(UserProfile):
+    generation_budget: GenerationBudget
+
+
+class NormalizeRequestIn(BaseModel):
+    request_text: str = Field(min_length=2, max_length=1000)
+    user_id: str | None = None
+    duration_preference_min: int | None = Field(default=None, ge=5, le=60)
+
+
+class NormalizedRequestOut(BaseModel):
+    normalized_request: "NormalizedAudioRequest"
+    cache_key: str
+
+
+class AssetSearchFilters(BaseModel):
+    type: AudioType | None = None
+    mood_tags: list[str] = Field(default_factory=list)
+    preferred_tags: list[str] = Field(default_factory=list)
+    negative_tags: list[str] = Field(default_factory=list)
+    min_duration_sec: int | None = Field(default=None, ge=1)
+    max_duration_sec: int | None = Field(default=None, ge=1)
+
+
+class AssetSearchRequest(BaseModel):
+    user_id: str
+    query: str | None = Field(default=None, min_length=2, max_length=1000)
+    cache_key: str | None = None
+    filters: AssetSearchFilters = Field(default_factory=AssetSearchFilters)
+    limit: int = Field(default=5, ge=1, le=20)
+
+
+class AssetSearchResult(BaseModel):
+    asset: "AudioAsset"
+    score: float
+    match_type: str
+    reasons: list[str]
+
+
+class AssetSearchResponse(BaseModel):
+    results: list[AssetSearchResult]
+    hit: bool
+    best_score: float | None
+    threshold: float
 
 
 class AudioAssetIn(BaseModel):
@@ -49,6 +110,7 @@ class AudioAssetIn(BaseModel):
     prompt_hash: str
     content_hash: str
     mood_tags: list[str]
+    tags: list[str] = Field(default_factory=list)
     sleep_stage: str = "pre_sleep"
     user_segment_tags: list[str]
     safety_status: str = "approved"
@@ -154,3 +216,27 @@ class EventIn(BaseModel):
     event_type: str = Field(min_length=2, max_length=80)
     asset_id: str | None = None
     payload: dict[str, Any] = Field(default_factory=dict)
+
+
+class AgentDecideRequest(BaseModel):
+    user_id: str
+    request_text: str = Field(min_length=2, max_length=1000)
+    generation_allowed: bool = True
+
+
+class PlannerMeta(BaseModel):
+    planner_source: str = "rule"
+    planner_confidence: float = 1.0
+    planner_latency_ms: int = 0
+    fallback_reason: str | None = None
+
+
+class AgentDecideResponse(BaseModel):
+    action: str  # play_asset | generate_job | no_match
+    normalized_request: NormalizedAudioRequest
+    profile_context: ProfileContext
+    search: AssetSearchResponse
+    asset: AudioAsset | None = None
+    job_id: str | None = None
+    reasons: list[str]
+    planner_meta: PlannerMeta | None = None

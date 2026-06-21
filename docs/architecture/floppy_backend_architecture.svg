@@ -1,0 +1,194 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1800" height="1120" viewBox="0 0 1800 1120" role="img" aria-label="Floppy 后端架构图">
+  <defs>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L9,3 L0,6 z" fill="#202020" />
+    </marker>
+    <style>
+      .title { font-family: "Songti SC", SimSun, serif; font-size: 38px; font-weight: 700; fill: #111; }
+      .subtitle { font-family: "Songti SC", SimSun, serif; font-size: 20px; fill: #555; }
+      .panel-title { font-family: "Songti SC", SimSun, serif; font-size: 22px; font-weight: 700; fill: #111; }
+      .label { font-family: "Songti SC", SimSun, serif; font-size: 18px; fill: #111; }
+      .small { font-family: "Songti SC", SimSun, serif; font-size: 15px; fill: #333; }
+      .tiny { font-family: "Songti SC", SimSun, serif; font-size: 13px; fill: #555; }
+      .code { font-family: Menlo, Consolas, monospace; font-size: 15px; fill: #222; }
+      .box { stroke: #222; stroke-width: 1.7; rx: 7; }
+      .thin { stroke: #333; stroke-width: 1.4; }
+      .dash { stroke-dasharray: 5 6; }
+      .arrow { stroke: #202020; stroke-width: 1.8; fill: none; marker-end: url(#arrow); }
+      .arrow-light { stroke: #555; stroke-width: 1.45; fill: none; marker-end: url(#arrow); }
+      .blue { fill: #eaf3fb; }
+      .yellow { fill: #fff6d9; }
+      .green { fill: #eaf6ea; }
+      .red { fill: #fdebea; }
+      .gray { fill: #f4f4f4; }
+      .white { fill: #fff; }
+    </style>
+  </defs>
+
+  <rect width="1800" height="1120" fill="#fff" />
+  <rect x="44" y="36" width="1712" height="1010" rx="22" fill="none" stroke="#222" stroke-width="1.6" stroke-dasharray="3 6" />
+
+  <text x="78" y="82" class="title">Floppy 后端架构（当前仓库实现）</text>
+  <text x="78" y="116" class="subtitle">FastAPI 执行层 + LangGraph 决策层 + 音频资产库 + MiniMax/本地 Provider；虚线标注生产替换点。</text>
+
+  <!-- Clients -->
+  <rect x="82" y="170" width="230" height="270" class="box blue" />
+  <text x="105" y="204" class="panel-title">入口</text>
+  <rect x="112" y="230" width="170" height="46" class="box white" />
+  <text x="139" y="259" class="label">App / Demo</text>
+  <rect x="112" y="300" width="170" height="46" class="box white" />
+  <text x="130" y="329" class="label">HTTP Client</text>
+  <rect x="112" y="370" width="170" height="46" class="box white" />
+  <text x="137" y="399" class="label">测试 / CLI</text>
+
+  <!-- API Layer -->
+  <rect x="370" y="145" width="330" height="600" class="box gray" />
+  <text x="395" y="182" class="panel-title">FastAPI 路由层</text>
+  <text x="395" y="210" class="code">floppy_backend/main.py</text>
+
+  <rect x="405" y="245" width="260" height="42" class="box white" />
+  <text x="425" y="271" class="code">/agent/decide</text>
+  <rect x="405" y="300" width="260" height="42" class="box white" />
+  <text x="425" y="326" class="code">/assets/search</text>
+  <rect x="405" y="355" width="260" height="42" class="box white" />
+  <text x="425" y="381" class="code">/generation-jobs</text>
+  <rect x="405" y="410" width="260" height="42" class="box white" />
+  <text x="425" y="436" class="code">/generate-audio</text>
+  <rect x="405" y="465" width="260" height="42" class="box white" />
+  <text x="425" y="491" class="code">/profile / checkin</text>
+  <rect x="405" y="520" width="260" height="42" class="box white" />
+  <text x="425" y="546" class="code">/events</text>
+  <rect x="405" y="575" width="260" height="42" class="box white" />
+  <text x="425" y="601" class="code">/audio/{object_key}</text>
+  <rect x="405" y="630" width="260" height="42" class="box white" />
+  <text x="425" y="656" class="code">/demo / demo/chat</text>
+
+  <!-- Agent Layer -->
+  <rect x="760" y="145" width="430" height="385" class="box yellow" />
+  <text x="785" y="182" class="panel-title">Agent 决策层</text>
+  <text x="785" y="210" class="code">services/agent_graph.py</text>
+
+  <rect x="800" y="245" width="155" height="50" class="box white" />
+  <text x="822" y="267" class="small">加载画像</text>
+  <text x="820" y="286" class="tiny">ProfileContext</text>
+
+  <rect x="995" y="245" width="155" height="50" class="box white" />
+  <text x="1012" y="267" class="small">请求归一化</text>
+  <text x="1017" y="286" class="tiny">cache_key</text>
+
+  <rect x="800" y="325" width="155" height="58" class="box white" />
+  <text x="816" y="349" class="small">Query Planner</text>
+  <text x="813" y="369" class="tiny">rule / ai fallback</text>
+
+  <rect x="995" y="325" width="155" height="58" class="box white" />
+  <text x="1020" y="349" class="small">资产检索</text>
+  <text x="1005" y="369" class="tiny">exact + tags + 向量</text>
+
+  <rect x="800" y="420" width="350" height="66" class="box white" />
+  <text x="828" y="446" class="label">路由决策</text>
+  <text x="828" y="470" class="tiny">play_asset / no_match / generate_job</text>
+
+  <!-- Services -->
+  <rect x="760" y="575" width="430" height="305" class="box green" />
+  <text x="785" y="612" class="panel-title">业务服务层</text>
+  <rect x="800" y="645" width="160" height="54" class="box white" />
+  <text x="815" y="668" class="small">ProfileService</text>
+  <text x="818" y="688" class="tiny">画像与分层</text>
+
+  <rect x="990" y="645" width="160" height="54" class="box white" />
+  <text x="1004" y="668" class="small">Recommendation</text>
+  <text x="1012" y="688" class="tiny">召回与排序</text>
+
+  <rect x="800" y="725" width="160" height="58" class="box white" />
+  <text x="815" y="749" class="small">Generation</text>
+  <text x="812" y="769" class="tiny">缓存 / 预算 / Job</text>
+
+  <rect x="990" y="725" width="160" height="58" class="box white" />
+  <text x="1007" y="749" class="small">SleepScript</text>
+  <text x="1010" y="769" class="tiny">&lt;#x#&gt; 停顿脚本</text>
+
+  <rect x="800" y="810" width="160" height="42" class="box white" />
+  <text x="817" y="837" class="small">ScriptGuard</text>
+
+  <rect x="990" y="810" width="160" height="42" class="box white" />
+  <text x="1005" y="837" class="small">RequestNormalizer</text>
+
+  <!-- Provider Layer -->
+  <rect x="1245" y="145" width="420" height="385" class="box red" />
+  <text x="1270" y="182" class="panel-title">音频 Provider 层</text>
+  <text x="1270" y="210" class="code">providers/audio.py</text>
+
+  <rect x="1290" y="248" width="150" height="60" class="box white" />
+  <text x="1308" y="272" class="small">LocalTone</text>
+  <text x="1312" y="293" class="tiny">测试 WAV</text>
+
+  <rect x="1475" y="248" width="150" height="60" class="box white" />
+  <text x="1494" y="272" class="small">MiniMax T2A</text>
+  <text x="1492" y="293" class="tiny">HTTP / Async</text>
+
+  <rect x="1290" y="350" width="335" height="54" class="box white" />
+  <text x="1310" y="373" class="small">Provider 元数据</text>
+  <text x="1310" y="393" class="tiny">model / task_id / file_id / cost / status</text>
+
+  <rect x="1290" y="438" width="335" height="54" class="box white dash thin" />
+  <text x="1310" y="461" class="small">生产替换点</text>
+  <text x="1310" y="481" class="tiny">火山 / Azure / 其他 TTS Provider</text>
+
+  <!-- Data Layer -->
+  <rect x="1245" y="575" width="420" height="305" class="box blue" />
+  <text x="1270" y="612" class="panel-title">数据与存储</text>
+
+  <rect x="1285" y="645" width="150" height="54" class="box white" />
+  <text x="1304" y="668" class="small">SQLite</text>
+  <text x="1295" y="688" class="tiny">users / profiles</text>
+
+  <rect x="1475" y="645" width="150" height="54" class="box white" />
+  <text x="1492" y="668" class="small">audio_assets</text>
+  <text x="1495" y="688" class="tiny">metadata + tags</text>
+
+  <rect x="1285" y="725" width="150" height="54" class="box white" />
+  <text x="1300" y="748" class="small">audio_scripts</text>
+  <text x="1304" y="768" class="tiny">脚本与 hash</text>
+
+  <rect x="1475" y="725" width="150" height="54" class="box white" />
+  <text x="1493" y="748" class="small">generation_jobs</text>
+  <text x="1498" y="768" class="tiny">任务与成本</text>
+
+  <rect x="1285" y="805" width="150" height="44" class="box white" />
+  <text x="1312" y="833" class="small">events</text>
+
+  <rect x="1475" y="805" width="150" height="44" class="box white" />
+  <text x="1485" y="833" class="small">LocalFileStorage</text>
+
+  <!-- Production replace -->
+  <rect x="370" y="790" width="330" height="110" class="box white dash thin" />
+  <text x="395" y="824" class="panel-title">生产替换点</text>
+  <text x="395" y="854" class="small">BackgroundTasks → 持久队列 / Worker</text>
+  <text x="395" y="880" class="small">SQLite → PostgreSQL + pgvector</text>
+
+  <rect x="1245" y="925" width="420" height="72" class="box white dash thin" />
+  <text x="1270" y="956" class="small">对象存储 → TOS / OSS / S3 + CDN + 签名 URL</text>
+  <text x="1270" y="980" class="tiny">当前 `/audio/{object_key}` 从本地目录返回文件</text>
+
+  <!-- Flow arrows -->
+  <path d="M312 305 C335 305, 345 305, 370 305" class="arrow" />
+  <path d="M700 270 C725 270, 735 270, 760 270" class="arrow" />
+  <path d="M955 270 L995 270" class="arrow-light" />
+  <path d="M1072 295 L1072 325" class="arrow-light" />
+  <path d="M955 354 L995 354" class="arrow-light" />
+  <path d="M1072 383 C1072 400, 1040 410, 1020 420" class="arrow-light" />
+  <path d="M975 486 L975 575" class="arrow" />
+  <path d="M1150 754 C1195 754, 1210 725, 1245 725" class="arrow" />
+  <path d="M1150 754 C1195 680, 1215 385, 1245 385" class="arrow" />
+  <path d="M1455 530 L1455 575" class="arrow" />
+  <path d="M1455 880 L1455 925" class="arrow-light" />
+  <path d="M405 596 C342 596, 305 596, 282 596 C250 596, 235 510, 230 440" class="arrow-light" />
+
+  <!-- Legend -->
+  <rect x="82" y="940" width="1108" height="74" class="box white" />
+  <text x="108" y="970" class="small">读图说明：</text>
+  <text x="202" y="970" class="tiny">实线为当前代码调用链；虚线框为明确保留的生产替换点。</text>
+  <text x="202" y="995" class="tiny">当前外部调用只发生在 Query Planner AI 模式与 MiniMax Provider；默认 pytest 使用 rule planner + local provider。</text>
+
+  <text x="78" y="1088" class="subtitle">图：Floppy 当前后端 = API 执行层、Agent 决策层、业务服务层、Provider 层、数据与存储层。</text>
+</svg>
