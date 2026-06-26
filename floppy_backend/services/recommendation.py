@@ -3,6 +3,7 @@ from __future__ import annotations
 from floppy_backend.config import Settings
 from floppy_backend.models import AssetSearchRequest, AssetSearchResponse, AssetSearchResult, AudioAsset, Recommendation, UserProfile
 from floppy_backend.repositories import Repository
+from floppy_backend.services.assets import is_placeholder_created_by
 from floppy_backend.utils import cosine_similarity, text_embedding
 
 
@@ -69,7 +70,8 @@ class RecommendationService:
             rec = self._score(asset, profile, query_embedding, preferred_tags=preferred_tags)
             if rec.score >= self.CANDIDATE_MIN_SCORE:
                 recommendations.append(rec)
-        recommendations.sort(key=lambda item: item.score, reverse=True)
+        # Prefer real assets over local placeholders once both clear the minimum score.
+        recommendations.sort(key=lambda item: (is_placeholder_created_by(item.asset.created_by), -item.score))
         return recommendations[:limit]
 
     def nearest(self, query: str, limit: int = 5) -> list[Recommendation]:
@@ -77,7 +79,7 @@ class RecommendationService:
         query_embedding = text_embedding(query)
         recommendations = [self._score(asset, None, query_embedding) for asset in assets]
         recommendations = [r for r in recommendations if r.score >= self.CANDIDATE_MIN_SCORE]
-        recommendations.sort(key=lambda item: item.score, reverse=True)
+        recommendations.sort(key=lambda item: (is_placeholder_created_by(item.asset.created_by), -item.score))
         return recommendations[:limit]
 
     def _score(self, asset: AudioAsset, profile: UserProfile | None, query_embedding: list[float], preferred_tags: list[str] | None = None) -> Recommendation:

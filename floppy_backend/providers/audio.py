@@ -12,7 +12,9 @@ from pathlib import Path
 
 from floppy_backend.config import Settings
 from floppy_backend.models import NormalizedAudioRequest
+from floppy_backend.providers.ambient import detect_sound_type, generate_ambient_wav
 from floppy_backend.utils import sha256_text
+from floppy_backend.voice_profiles import resolve_voice_id
 
 
 @dataclass(frozen=True)
@@ -49,9 +51,8 @@ class AudioGenerationProvider:
 class LocalToneAudioProvider(AudioGenerationProvider):
     """Deterministic local WAV generator for integration testing.
 
-    This deliberately produces simple, low-volume tones so the MVP can validate
-    storage, metadata, playback URL, caching, and recommendation behavior without
-    relying on a paid TTS provider.
+    For white_noise/music: generates distinguishable procedural ambient audio.
+    For other types: generates simple tones as placeholder.
     """
 
     name = "local_tone_v1"
@@ -70,21 +71,15 @@ class LocalToneAudioProvider(AudioGenerationProvider):
     ) -> GeneratedAudio:
         if self.delay_sec > 0:
             time.sleep(self.delay_sec)
-        duration_sec = min(normalized.duration_sec, 20)
-        sample_rate = 16_000
-        base_frequency = self._frequency(normalized)
-        amplitude = 6000
+        duration_sec = min(normalized.duration_sec, 120 if normalized.intent.value in ("white_noise", "music") else 20)
         output_path.parent.mkdir(parents=True, exist_ok=True)
 
-        with wave.open(str(output_path), "wb") as wav:
-            wav.setnchannels(1)
-            wav.setsampwidth(2)
-            wav.setframerate(sample_rate)
-            for index in range(sample_rate * duration_sec):
-                t = index / sample_rate
-                envelope = min(1.0, index / sample_rate / 2.0, (sample_rate * duration_sec - index) / sample_rate / 2.0)
-                sample = int(amplitude * envelope * math.sin(2 * math.pi * base_frequency * t))
-                wav.writeframesraw(sample.to_bytes(2, byteorder="little", signed=True))
+        # Use procedural ambient for white_noise/music
+        if normalized.intent.value in ("white_noise", "music"):
+            sound_type = detect_sound_type(title or "", normalized.content_topic or [])
+            generate_ambient_wav(output_path, sound_type, duration_sec)
+        else:
+            self._generate_tone(normalized, output_path, duration_sec)
 
         title = title or self._title(normalized)
         return GeneratedAudio(
@@ -96,6 +91,20 @@ class LocalToneAudioProvider(AudioGenerationProvider):
             provider_model="local_tone",
             provider_status="succeeded",
         )
+
+    def _generate_tone(self, normalized: NormalizedAudioRequest, output_path: Path, duration_sec: int) -> None:
+        sample_rate = 16_000
+        base_frequency = self._frequency(normalized)
+        amplitude = 6000
+        with wave.open(str(output_path), "wb") as wav:
+            wav.setnchannels(1)
+            wav.setsampwidth(2)
+            wav.setframerate(sample_rate)
+            for index in range(sample_rate * duration_sec):
+                t = index / sample_rate
+                envelope = min(1.0, index / sample_rate / 2.0, (sample_rate * duration_sec - index) / sample_rate / 2.0)
+                sample = int(amplitude * envelope * math.sin(2 * math.pi * base_frequency * t))
+                wav.writeframesraw(sample.to_bytes(2, byteorder="little", signed=True))
 
     def _frequency(self, normalized: NormalizedAudioRequest) -> float:
         by_intent = {
@@ -167,10 +176,11 @@ class MiniMaxTTSProvider(AudioGenerationProvider):
         title: str | None = None,
     ) -> GeneratedAudio:
         text = script_text or self._fallback_text(normalized)
+        voice_style = normalized.voice_style if normalized else None
         if len(text) > self.settings.minimax_sync_max_chars:
             return self.generate_async_and_wait(normalized, output_path, object_key, script_text=text, title=title)
 
-        payload = self._build_payload(text)
+        payload = self._build_payload(text, voice_style=voice_style)
         response = self._post_json("/v1/t2a_v2", payload)
         base_resp = response.get("base_resp") or {}
         if base_resp.get("status_code") not in (0, None):
@@ -201,10 +211,10 @@ class MiniMaxTTSProvider(AudioGenerationProvider):
             estimated_cost_usd=self.estimate_cost(usage_characters, self.settings.minimax_model),
         )
 
-    def create_async_task(self, text: str) -> MiniMaxAsyncTask:
+    def create_async_task(self, text: str, voice_style: str | None = None) -> MiniMaxAsyncTask:
         if len(text) > 50_000:
             raise ProviderConfigurationError("MiniMax async direct text supports up to 50,000 characters; upload text file for longer input")
-        payload = self._build_payload(text)
+        payload = self._build_payload(text, voice_style=voice_style)
         payload.pop("stream", None)
         payload.pop("output_format", None)
         payload["audio_setting"] = {
@@ -254,7 +264,8 @@ class MiniMaxTTSProvider(AudioGenerationProvider):
         script_text: str,
         title: str | None = None,
     ) -> GeneratedAudio:
-        task = self.create_async_task(script_text)
+        voice_style = normalized.voice_style if normalized else None
+        task = self.create_async_task(script_text, voice_style=voice_style)
         status = MiniMaxAsyncStatus(task_id=task.task_id, status="processing", file_id=task.file_id, provider_payload=task.provider_payload)
         for _ in range(self.settings.minimax_async_max_polls):
             time.sleep(self.settings.minimax_async_poll_interval_sec)
@@ -300,15 +311,17 @@ class MiniMaxTTSProvider(AudioGenerationProvider):
             status_msg += " (hint: Chinese-account keys require FLOPPY_MINIMAX_BASE_URL=https://api.minimaxi.com)"
         raise ProviderAPIError(status_msg, status_code=status_code)
 
-    def _build_payload(self, text: str) -> dict:
+    def _build_payload(self, text: str, voice_style: str | None = None) -> dict:
+        profile = resolve_voice_id(voice_style, self.settings.minimax_voice_id)
         voice_setting = {
-            "voice_id": self.settings.minimax_voice_id,
-            "speed": self.settings.minimax_speed,
+            "voice_id": profile["voice_id"],
+            "speed": profile.get("speed", self.settings.minimax_speed),
             "vol": self.settings.minimax_volume,
             "pitch": self.settings.minimax_pitch,
         }
-        if self.settings.minimax_emotion:
-            voice_setting["emotion"] = self.settings.minimax_emotion
+        emotion = profile.get("emotion", self.settings.minimax_emotion)
+        if emotion:
+            voice_setting["emotion"] = emotion
         return {
             "model": self.settings.minimax_model,
             "text": text,

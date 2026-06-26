@@ -222,6 +222,7 @@ class AgentDecideRequest(BaseModel):
     user_id: str
     request_text: str = Field(min_length=2, max_length=1000)
     generation_allowed: bool = True
+    current_asset_id: str | None = None  # currently playing/just played asset (for remix context)
 
 
 class PlannerMeta(BaseModel):
@@ -232,11 +233,172 @@ class PlannerMeta(BaseModel):
 
 
 class AgentDecideResponse(BaseModel):
-    action: str  # play_asset | generate_job | no_match
+    action: str  # play_asset | generate_job | remix_current | no_match
     normalized_request: NormalizedAudioRequest
     profile_context: ProfileContext
     search: AssetSearchResponse
     asset: AudioAsset | None = None
     job_id: str | None = None
+    remix_job_id: str | None = None
     reasons: list[str]
     planner_meta: PlannerMeta | None = None
+
+
+# --- P0: Questionnaire ---
+
+
+class UserQuestionnaireIn(BaseModel):
+    gender: str | None = None
+    age_range: str | None = None  # e.g. "18-24", "25-34"
+    occupation: str | None = None
+    bedtime: str | None = None  # e.g. "23:00"
+    main_sleep_problem: str | None = None  # e.g. "difficulty_falling_asleep", "light_sleep"
+    bedtime_habits: list[str] = Field(default_factory=list)  # e.g. ["phone", "reading"]
+    favorite_content_types: list[str] = Field(default_factory=list)
+    preferred_companion_style: str | None = None  # e.g. "warm", "professional", "playful"
+    voice_preferences: list[str] = Field(default_factory=list)
+
+
+class UserQuestionnaire(UserQuestionnaireIn):
+    user_id: str
+    completed_at: datetime | None = None
+    updated_at: datetime
+
+
+# --- P0: Playback History & Feedback ---
+
+
+class PlaybackSource(StrEnum):
+    RECOMMEND = "recommend"
+    GENERATED = "generated"
+    REMIX = "remix"
+    IMPORT = "import"
+
+
+class PlaybackFeedbackType(StrEnum):
+    TRIAL_RATING = "trial_rating"
+    FAVORITE = "favorite"
+    DISLIKE = "dislike"
+    SKIP = "skip"
+    COMPLETE = "complete"
+    MORNING_FEEDBACK = "morning_feedback"
+
+
+class PlaybackStartIn(BaseModel):
+    asset_id: str
+    source: PlaybackSource = PlaybackSource.RECOMMEND
+    request_text: str | None = None
+    parent_asset_id: str | None = None  # for remix: the original voice asset
+    ambient_asset_id: str | None = None  # for remix: the ambient layer
+
+
+class PlaybackFeedbackIn(BaseModel):
+    feedback_type: PlaybackFeedbackType
+    rating: int | None = Field(default=None, ge=1, le=5)
+    progress: float | None = Field(default=None, ge=0.0, le=1.0)
+    morning_feedback: str | None = None
+
+
+class PlaybackRecord(BaseModel):
+    id: str
+    user_id: str
+    asset_id: str
+    title: str
+    request_text: str | None = None
+    source: str
+    script_summary: str | None = None
+    parent_asset_id: str | None = None
+    ambient_asset_id: str | None = None
+    started_at: datetime
+    completed_at: datetime | None = None
+    progress: float = 0.0
+    rating: int | None = None
+    feedback_type: str | None = None
+    morning_feedback: str | None = None
+
+
+# --- P0: Remix ---
+
+
+class RemixIntent(StrEnum):
+    ADD_BACKGROUND = "add_background"
+    CHANGE_BACKGROUND = "change_background"
+    ADJUST_VOLUME = "adjust_volume"
+    REMOVE_BACKGROUND = "remove_background"
+    VOICE_PLUS_AMBIENT = "voice_plus_ambient"
+
+
+class MixParams(BaseModel):
+    background_volume: float = Field(default=0.3, ge=0.0, le=2.0)
+    crossfade_in_sec: int = Field(default=2, ge=0, le=10)
+    crossfade_out_sec: int = Field(default=3, ge=0, le=10)
+    duck_on_speech: bool = True
+
+
+class RemixRequestIn(BaseModel):
+    """Legacy remix request. Deprecated — use POST /remix/sessions instead."""
+    voice_asset_id: str
+    ambient_asset_id: str | None = None
+    sound_type: str | None = None
+    ambient_tags: list[str] = Field(default_factory=list)
+    voice_volume: float = Field(default=1.0, ge=0.0, le=2.0)
+    ambient_volume: float = Field(default=0.3, ge=0.0, le=2.0)
+
+
+class RemixSessionCreateIn(BaseModel):
+    """Create a remix session (§3.4 of algo contract)."""
+    foreground_asset_id: str | None = None  # if None, inferred from active playback
+    ambient_asset_id: str | None = None
+    sound_type: str | None = None  # rain/ocean/fire/forest/stream/fan/piano/wind
+    intent: RemixIntent = RemixIntent.ADD_BACKGROUND
+    mix_params: MixParams = Field(default_factory=MixParams)
+
+
+class RemixSessionPatchIn(BaseModel):
+    """Adjust an ongoing remix session."""
+    intent: RemixIntent | None = None  # change_background/adjust_volume/remove_background
+    sound_type: str | None = None
+    ambient_asset_id: str | None = None
+    mix_params: MixParams | None = None
+
+
+class RemixSession(BaseModel):
+    id: str
+    user_id: str
+    voice_asset_id: str
+    ambient_asset_id: str | None = None
+    sound_type: str | None = None
+    intent: str | None = None
+    mix_params: MixParams | None = None
+    foreground_source: str | None = None
+    generation_job_id: str | None = None
+    status: str
+    output_asset_id: str | None = None
+    error_message: str | None = None
+    created_at: datetime
+    updated_at: datetime
+    output_asset: AudioAsset | None = None
+
+
+class AssetRemixable(BaseModel):
+    asset_id: str
+    remixable: bool
+    reason: str | None = None
+    format: str | None = None  # wav/mp3
+
+
+class RemixJob(BaseModel):
+    id: str
+    user_id: str
+    voice_asset_id: str
+    ambient_asset_id: str | None = None
+    sound_type: str | None = None
+    ambient_tags: list[str] = Field(default_factory=list)
+    status: str
+    output_asset_id: str | None = None
+    voice_volume: float = 1.0
+    ambient_volume: float = 0.3
+    error_message: str | None = None
+    created_at: datetime
+    updated_at: datetime
+    output_asset: AudioAsset | None = None

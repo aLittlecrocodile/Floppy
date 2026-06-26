@@ -4,7 +4,7 @@ import sqlite3
 from datetime import datetime, timedelta
 from threading import RLock
 
-from floppy_backend.models import AudioAsset, AudioAssetIn, AudioScript, AudioScriptIn, AudioType, EventIn, GenerationJob, ProfileCheckinIn, UserProfile, UserProfileIn
+from floppy_backend.models import AudioAsset, AudioAssetIn, AudioScript, AudioScriptIn, AudioType, EventIn, GenerationJob, MixParams, PlaybackRecord, ProfileCheckinIn, RemixJob, RemixSession, UserProfile, UserProfileIn, UserQuestionnaire, UserQuestionnaireIn
 from floppy_backend.utils import dumps, loads, stable_id, utcnow
 
 
@@ -124,12 +124,12 @@ class Repository:
         return updated
 
     def upsert_asset(self, asset: AudioAssetIn) -> AudioAsset:
-        asset_id = stable_id(
+        existing_asset = self.get_asset_by_prompt_hash(asset.prompt_hash)
+        asset_id = existing_asset.id if existing_asset else stable_id(
             "aud",
             {
                 "prompt_hash": asset.prompt_hash,
                 "object_key": asset.object_key,
-                "content_hash": asset.content_hash,
             },
         )
         created_at = utcnow()
@@ -550,4 +550,184 @@ class Repository:
             updated_at=_dt(row["updated_at"]),
             asset=asset,
             script=script,
+        )
+
+    # --- Questionnaire ---
+
+    def upsert_questionnaire(self, user_id: str, data: UserQuestionnaireIn) -> UserQuestionnaire:
+        self.ensure_user(user_id)
+        now = utcnow()
+        with self._lock:
+            self.conn.execute(
+                """
+                INSERT INTO user_questionnaires (
+                    user_id, gender, age_range, occupation, bedtime, main_sleep_problem,
+                    bedtime_habits, favorite_content_types, preferred_companion_style,
+                    voice_preferences, completed_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(user_id) DO UPDATE SET
+                    gender=excluded.gender, age_range=excluded.age_range,
+                    occupation=excluded.occupation, bedtime=excluded.bedtime,
+                    main_sleep_problem=excluded.main_sleep_problem,
+                    bedtime_habits=excluded.bedtime_habits,
+                    favorite_content_types=excluded.favorite_content_types,
+                    preferred_companion_style=excluded.preferred_companion_style,
+                    voice_preferences=excluded.voice_preferences,
+                    completed_at=excluded.completed_at, updated_at=excluded.updated_at
+                """,
+                (
+                    user_id, data.gender, data.age_range, data.occupation, data.bedtime,
+                    data.main_sleep_problem, dumps(data.bedtime_habits),
+                    dumps(data.favorite_content_types), data.preferred_companion_style,
+                    dumps(data.voice_preferences), now.isoformat(), now.isoformat(),
+                ),
+            )
+            self.conn.commit()
+        return self.get_questionnaire(user_id)  # type: ignore[return-value]
+
+    def get_questionnaire(self, user_id: str) -> UserQuestionnaire | None:
+        with self._lock:
+            row = self.conn.execute("SELECT * FROM user_questionnaires WHERE user_id = ?", (user_id,)).fetchone()
+        if row is None:
+            return None
+        return UserQuestionnaire(
+            user_id=row["user_id"], gender=row["gender"], age_range=row["age_range"],
+            occupation=row["occupation"], bedtime=row["bedtime"],
+            main_sleep_problem=row["main_sleep_problem"],
+            bedtime_habits=loads(row["bedtime_habits"]),
+            favorite_content_types=loads(row["favorite_content_types"]),
+            preferred_companion_style=row["preferred_companion_style"],
+            voice_preferences=loads(row["voice_preferences"]),
+            completed_at=_dt(row["completed_at"]) if row["completed_at"] else None,
+            updated_at=_dt(row["updated_at"]),
+        )
+
+    # --- Playback History ---
+
+    def record_playback_start(self, user_id: str, asset_id: str, title: str, source: str, request_text: str | None = None, parent_asset_id: str | None = None, ambient_asset_id: str | None = None) -> str:
+        self.ensure_user(user_id)
+        now = utcnow()
+        record_id = stable_id("pb", {"user_id": user_id, "asset_id": asset_id, "at": now.isoformat()})
+        with self._lock:
+            self.conn.execute(
+                """INSERT INTO playback_history (id, user_id, asset_id, title, request_text, source, parent_asset_id, ambient_asset_id, started_at, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (record_id, user_id, asset_id, title, request_text, source, parent_asset_id, ambient_asset_id, now.isoformat(), now.isoformat()),
+            )
+            self.conn.commit()
+        return record_id
+
+    def update_playback_feedback(self, record_id: str, *, feedback_type: str | None = None, rating: int | None = None, progress: float | None = None, morning_feedback: str | None = None, completed: bool = False) -> None:
+        now = utcnow()
+        with self._lock:
+            self.conn.execute(
+                """UPDATE playback_history SET
+                    feedback_type = COALESCE(?, feedback_type),
+                    rating = COALESCE(?, rating),
+                    progress = COALESCE(?, progress),
+                    morning_feedback = COALESCE(?, morning_feedback),
+                    completed_at = CASE WHEN ? THEN ? ELSE completed_at END
+                WHERE id = ?""",
+                (feedback_type, rating, progress, morning_feedback, completed, now.isoformat() if completed else None, record_id),
+            )
+            self.conn.commit()
+
+    def list_playback_history(self, user_id: str, limit: int = 50) -> list[PlaybackRecord]:
+        with self._lock:
+            rows = self.conn.execute(
+                "SELECT * FROM playback_history WHERE user_id = ? ORDER BY started_at DESC LIMIT ?",
+                (user_id, limit),
+            ).fetchall()
+        return [PlaybackRecord(
+            id=r["id"], user_id=r["user_id"], asset_id=r["asset_id"], title=r["title"],
+            request_text=r["request_text"], source=r["source"], script_summary=r["script_summary"],
+            parent_asset_id=r["parent_asset_id"], ambient_asset_id=r["ambient_asset_id"],
+            started_at=_dt(r["started_at"]), completed_at=_dt(r["completed_at"]) if r["completed_at"] else None,
+            progress=r["progress"], rating=r["rating"], feedback_type=r["feedback_type"],
+            morning_feedback=r["morning_feedback"],
+        ) for r in rows]
+
+    # --- Remix Jobs / Sessions ---
+
+    def create_remix_job(self, user_id: str, voice_asset_id: str, ambient_asset_id: str | None, ambient_tags: list[str], voice_volume: float, ambient_volume: float, sound_type: str | None = None, intent: str | None = None, mix_params: MixParams | None = None, foreground_source: str | None = None, generation_job_id: str | None = None) -> str:
+        self.ensure_user(user_id)
+        now = utcnow()
+        job_id = stable_id("rmx", {"user_id": user_id, "voice": voice_asset_id, "at": now.isoformat()})
+        with self._lock:
+            self.conn.execute(
+                """INSERT INTO remix_jobs (id, user_id, voice_asset_id, ambient_asset_id, sound_type, ambient_tags, voice_volume, ambient_volume, status, intent, mix_params, foreground_source, generation_job_id, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?)""",
+                (job_id, user_id, voice_asset_id, ambient_asset_id, sound_type, dumps(ambient_tags), voice_volume, ambient_volume, intent, dumps(mix_params.model_dump()) if mix_params else None, foreground_source, generation_job_id, now.isoformat(), now.isoformat()),
+            )
+            self.conn.commit()
+        return job_id
+
+    def update_remix_job(self, job_id: str, *, status: str, output_asset_id: str | None = None, error_message: str | None = None, sound_type: str | None = None, ambient_asset_id: str | None = None, mix_params: MixParams | None = None, intent: str | None = None) -> None:
+        with self._lock:
+            self.conn.execute(
+                """UPDATE remix_jobs SET status=?, output_asset_id=COALESCE(?, output_asset_id),
+                error_message=COALESCE(?, error_message), sound_type=COALESCE(?, sound_type),
+                ambient_asset_id=COALESCE(?, ambient_asset_id), mix_params=COALESCE(?, mix_params),
+                intent=COALESCE(?, intent), updated_at=? WHERE id=?""",
+                (status, output_asset_id, error_message, sound_type, ambient_asset_id, dumps(mix_params.model_dump()) if mix_params else None, intent, utcnow().isoformat(), job_id),
+            )
+            self.conn.commit()
+
+    def get_remix_job(self, job_id: str) -> RemixJob | None:
+        with self._lock:
+            row = self.conn.execute("SELECT * FROM remix_jobs WHERE id = ?", (job_id,)).fetchone()
+        if row is None:
+            return None
+        output_asset = self.get_asset(row["output_asset_id"]) if row["output_asset_id"] else None
+        return RemixJob(
+            id=row["id"], user_id=row["user_id"], voice_asset_id=row["voice_asset_id"],
+            ambient_asset_id=row["ambient_asset_id"], sound_type=row["sound_type"],
+            ambient_tags=loads(row["ambient_tags"]),
+            status=row["status"], output_asset_id=row["output_asset_id"],
+            voice_volume=row["voice_volume"], ambient_volume=row["ambient_volume"],
+            error_message=row["error_message"], created_at=_dt(row["created_at"]),
+            updated_at=_dt(row["updated_at"]), output_asset=output_asset,
+        )
+
+    def get_remix_session(self, job_id: str) -> RemixSession | None:
+        with self._lock:
+            row = self.conn.execute("SELECT * FROM remix_jobs WHERE id = ?", (job_id,)).fetchone()
+        if row is None:
+            return None
+        output_asset = self.get_asset(row["output_asset_id"]) if row["output_asset_id"] else None
+        mp = MixParams(**loads(row["mix_params"])) if row["mix_params"] else None
+        return RemixSession(
+            id=row["id"], user_id=row["user_id"], voice_asset_id=row["voice_asset_id"],
+            ambient_asset_id=row["ambient_asset_id"], sound_type=row["sound_type"],
+            intent=row["intent"], mix_params=mp, foreground_source=row["foreground_source"],
+            generation_job_id=row["generation_job_id"], status=row["status"],
+            output_asset_id=row["output_asset_id"], error_message=row["error_message"],
+            created_at=_dt(row["created_at"]), updated_at=_dt(row["updated_at"]),
+            output_asset=output_asset,
+        )
+
+    def count_remix_last_hour(self, user_id: str) -> int:
+        since = (utcnow() - timedelta(hours=1)).isoformat()
+        with self._lock:
+            row = self.conn.execute(
+                "SELECT COUNT(*) as cnt FROM remix_jobs WHERE user_id = ? AND created_at >= ?",
+                (user_id, since),
+            ).fetchone()
+        return int(row["cnt"] or 0)
+
+    def get_active_playback(self, user_id: str) -> PlaybackRecord | None:
+        with self._lock:
+            row = self.conn.execute(
+                "SELECT * FROM playback_history WHERE user_id = ? AND completed_at IS NULL ORDER BY started_at DESC LIMIT 1",
+                (user_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        return PlaybackRecord(
+            id=row["id"], user_id=row["user_id"], asset_id=row["asset_id"], title=row["title"],
+            request_text=row["request_text"], source=row["source"], script_summary=row["script_summary"],
+            parent_asset_id=row["parent_asset_id"], ambient_asset_id=row["ambient_asset_id"],
+            started_at=_dt(row["started_at"]), completed_at=None,
+            progress=row["progress"], rating=row["rating"], feedback_type=row["feedback_type"],
+            morning_feedback=row["morning_feedback"],
         )

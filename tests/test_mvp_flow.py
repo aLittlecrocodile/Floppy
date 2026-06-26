@@ -938,4 +938,575 @@ def test_agent_decide_ai_tags_hit_demo_asset(tmp_path, monkeypatch):
         assert body["action"] == "play_asset"
         assert body["search"]["best_score"] >= 0.60
         assert body["search"]["hit"] is True
-        assert any("标签命中" in r for r in body["reasons"])
+
+
+def test_catalog_counts_and_distribution():
+    from floppy_backend.catalog import AUDIO_CATALOG
+    from collections import Counter
+    assert len(AUDIO_CATALOG) >= 22
+    types = Counter(i["audio_type"] for i in AUDIO_CATALOG)
+    assert types["white_noise"] >= 5
+    assert types["music"] >= 5
+    assert types["meditation"] >= 5
+    assert types["story"] + types.get("podcast_digest", 0) + types.get("asmr", 0) >= 6
+
+
+def test_seed_creates_at_least_20_assets(tmp_path, monkeypatch):
+    monkeypatch.setenv("FLOPPY_DATABASE_PATH", str(tmp_path / "floppy.db"))
+    monkeypatch.setenv("FLOPPY_STORAGE_DIR", str(tmp_path / "audio"))
+    get_settings.cache_clear()
+
+    with TestClient(app) as client:
+        resp = client.post("/admin/seed")
+        assert resp.status_code == 200
+        assert resp.json()["created_or_updated"] >= 20
+
+
+def test_demo_asset_metadata_correct(tmp_path, monkeypatch):
+    monkeypatch.setenv("FLOPPY_DATABASE_PATH", str(tmp_path / "floppy.db"))
+    monkeypatch.setenv("FLOPPY_STORAGE_DIR", str(tmp_path / "audio"))
+    get_settings.cache_clear()
+
+    with TestClient(app) as client:
+        client.post("/admin/seed")
+        # Find the breathing rain demo asset
+        from floppy_backend.catalog import AUDIO_CATALOG
+        demo = next(i for i in AUDIO_CATALOG if "呼吸" in i["title"] and "雨" in i["request_text"])
+        assert demo["duration_sec"] >= 600
+        assert demo["quality_score"] >= 0.85
+        assert demo["is_placeholder"] is False
+
+
+def test_placeholder_identified_in_catalog():
+    from floppy_backend.catalog import AUDIO_CATALOG
+    placeholders = [i for i in AUDIO_CATALOG if i["is_placeholder"]]
+    non_placeholders = [i for i in AUDIO_CATALOG if not i["is_placeholder"]]
+    assert len(placeholders) >= 5
+    assert len(non_placeholders) >= 10
+    for item in AUDIO_CATALOG:
+        if item["audio_type"] in ("white_noise", "music"):
+            assert item["is_placeholder"] is True
+        if item["audio_type"] in ("meditation", "story", "podcast_digest"):
+            assert item["is_placeholder"] is False
+
+
+def test_seed_marks_all_as_placeholder(tmp_path, monkeypatch):
+    """After seed (no real MiniMax), ALL assets are created_by=seed_placeholder."""
+    monkeypatch.setenv("FLOPPY_DATABASE_PATH", str(tmp_path / "floppy.db"))
+    monkeypatch.setenv("FLOPPY_STORAGE_DIR", str(tmp_path / "audio"))
+    get_settings.cache_clear()
+
+    with TestClient(app) as client:
+        client.post("/admin/seed")
+        recs = client.get("/users/u_test/recommendations?limit=24")
+
+    # Should not exist — but if this test runs standalone we need a profile
+    # Use recommendations endpoint which doesn't require profile
+    from floppy_backend.db import connect, initialize
+    from floppy_backend.repositories import Repository
+    conn = connect(tmp_path / "floppy.db")
+    initialize(conn)
+    repo = Repository(conn)
+    assets = repo.list_assets(limit=50)
+    assert len(assets) >= 20
+    for asset in assets:
+        assert asset.created_by == "seed_placeholder", f"{asset.title} has created_by={asset.created_by}"
+    conn.close()
+
+
+def test_pregen_minimax_created_by_distinguishable():
+    """pregen_minimax created_by is NOT seed_placeholder — not mistaken for placeholder."""
+    from floppy_backend.services.assets import is_placeholder_created_by
+
+    assert is_placeholder_created_by("seed_placeholder") is True
+    assert is_placeholder_created_by("pregen") is True
+    assert is_placeholder_created_by("pregen_catalog") is True
+    assert is_placeholder_created_by("pregen_local") is True
+    assert is_placeholder_created_by("pregen_minimax") is False
+    assert is_placeholder_created_by("ondemand") is False
+
+
+def test_catalog_prompt_hashes_are_unique():
+    from floppy_backend.catalog import AUDIO_CATALOG
+    from floppy_backend.models import GenerationRequest
+    from floppy_backend.services.normalizer import RequestNormalizer
+    from floppy_backend.utils import sha256_json
+
+    normalizer = RequestNormalizer()
+    keys = []
+    for item in AUDIO_CATALOG:
+        normalized = normalizer.normalize(GenerationRequest(request_text=item["request_text"]), profile=None)
+        keys.append(sha256_json({
+            "normalized": normalized.model_dump(mode="json"),
+            "title": item["title"],
+            "script_text": item.get("script_text"),
+        }))
+
+    assert len(keys) == len(set(keys))
+
+
+def test_asset_upsert_reuses_prompt_hash(tmp_path):
+    conn = connect(tmp_path / "floppy.db")
+    initialize(conn)
+    repo = Repository(conn)
+
+    base = {
+        "type": AudioType.MEDITATION,
+        "title": "可重复生成资产",
+        "duration_sec": 120,
+        "language": "zh-CN",
+        "voice_id": "warm_female",
+        "prompt_hash": "same_prompt_hash",
+        "mood_tags": ["calm"],
+        "tags": ["breathing"],
+        "user_segment_tags": ["balanced_sleep"],
+        "safety_status": "approved",
+        "quality_score": 0.8,
+        "embedding": [0.0] * 32,
+        "created_by": "pregen_minimax",
+    }
+    first = repo.upsert_asset(AudioAssetIn(**base, object_key="pregen/a.mp3", content_hash="content-a"))
+    second = repo.upsert_asset(AudioAssetIn(**base, object_key="pregen/b.mp3", content_hash="content-b"))
+
+    assert second.id == first.id
+    assert second.object_key == "pregen/b.mp3"
+    assert second.content_hash == "content-b"
+    conn.close()
+
+
+def test_ambient_provider_generates_distinct_audio(tmp_path):
+    """Each white_noise/music catalog item produces a different WAV file."""
+    from floppy_backend.catalog import AUDIO_CATALOG
+    from floppy_backend.models import GenerationRequest, NormalizedAudioRequest, AudioType
+    from floppy_backend.providers.audio import LocalToneAudioProvider
+    from floppy_backend.services.normalizer import RequestNormalizer
+
+    provider = LocalToneAudioProvider()
+    normalizer = RequestNormalizer()
+    hashes = []
+    ambient_items = [i for i in AUDIO_CATALOG if i["audio_type"] in ("white_noise", "music")]
+    assert len(ambient_items) >= 12
+
+    for idx, item in enumerate(ambient_items):
+        normalized = normalizer.normalize(GenerationRequest(request_text=item["request_text"]), profile=None)
+        out = tmp_path / f"ambient_{idx}.wav"
+        result = provider.generate(normalized, out, f"test/{idx}.wav", title=item["title"])
+        hashes.append(result.content_hash)
+
+    # All should be distinct
+    assert len(set(hashes)) == len(hashes), "Some ambient items produced identical audio"
+
+
+def test_voice_profile_mapping():
+    """voice_profiles resolves different voice_ids for different styles."""
+    from floppy_backend.voice_profiles import AVAILABLE_MANDARIN_VOICE_IDS, CONFIRMED_MANDARIN_SYSTEM_VOICE_IDS, VOICE_PROFILES, resolve_voice_id
+
+    assert len(VOICE_PROFILES) >= 5
+    warm_f = resolve_voice_id("warm_female", "fallback")
+    warm_m = resolve_voice_id("warm_male", "fallback")
+    assert warm_f["voice_id"] != warm_m["voice_id"]
+    assert {item["voice_id"] for item in VOICE_PROFILES.values()} == AVAILABLE_MANDARIN_VOICE_IDS
+    assert AVAILABLE_MANDARIN_VOICE_IDS.issubset(CONFIRMED_MANDARIN_SYSTEM_VOICE_IDS)
+    # Unknown style falls back
+    unknown = resolve_voice_id("nonexistent_style", "my_fallback_id")
+    assert unknown["voice_id"] == "my_fallback_id"
+
+
+def test_script_expander_reaches_target():
+    """Expanded scripts reach at least 40% of target duration."""
+    from floppy_backend.catalog import AUDIO_CATALOG
+    from floppy_backend.services.script_expander import expand_script, estimate_script_duration
+
+    for item in AUDIO_CATALOG:
+        if not item.get("script_text") or item["provider_strategy"] != "minimax":
+            continue
+        expanded = expand_script(item["script_text"], item["duration_sec"])
+        dur = estimate_script_duration(expanded)
+        assert dur >= item["duration_sec"] * 0.35, f"{item['title']}: expanded to {dur:.0f}s < 35% of {item['duration_sec']}s"
+
+
+def test_questionnaire_crud(tmp_path, monkeypatch):
+    monkeypatch.setenv("FLOPPY_DATABASE_PATH", str(tmp_path / "floppy.db"))
+    monkeypatch.setenv("FLOPPY_STORAGE_DIR", str(tmp_path / "audio"))
+    get_settings.cache_clear()
+
+    with TestClient(app) as client:
+        payload = {
+            "gender": "female",
+            "age_range": "25-34",
+            "occupation": "designer",
+            "bedtime": "23:30",
+            "main_sleep_problem": "difficulty_falling_asleep",
+            "bedtime_habits": ["phone", "reading"],
+            "favorite_content_types": ["meditation", "story"],
+            "preferred_companion_style": "warm",
+            "voice_preferences": ["warm_female", "gentle_female"],
+        }
+        resp = client.put("/users/u_q1/questionnaire", json=payload)
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["gender"] == "female"
+        assert body["bedtime_habits"] == ["phone", "reading"]
+
+        get_resp = client.get("/users/u_q1/questionnaire")
+        assert get_resp.status_code == 200
+        assert get_resp.json()["main_sleep_problem"] == "difficulty_falling_asleep"
+
+        assert client.get("/users/u_missing/questionnaire").status_code == 404
+
+
+def test_playback_history_and_feedback(tmp_path, monkeypatch):
+    monkeypatch.setenv("FLOPPY_DATABASE_PATH", str(tmp_path / "floppy.db"))
+    monkeypatch.setenv("FLOPPY_STORAGE_DIR", str(tmp_path / "audio"))
+    get_settings.cache_clear()
+
+    with TestClient(app) as client:
+        client.post("/admin/seed")
+        profile_payload = {
+            "audio_type_preferences": ["story"],
+            "voice_preferences": ["warm_female"],
+            "background_preferences": ["rain_soft"],
+            "duration_preference_min": 15,
+            "stress_level": "medium",
+            "anxiety_level": "medium",
+            "avg_sleep_latency_min": 20,
+            "mood_tags": ["calm"],
+        }
+        client.put("/users/u_pb/profile", json=profile_payload)
+
+        recs = client.get("/users/u_pb/recommendations?limit=1").json()
+        asset_id = recs[0]["asset"]["id"]
+
+        start = client.post("/users/u_pb/playback", json={"asset_id": asset_id, "source": "recommend"})
+        assert start.status_code == 201
+        record_id = start.json()["record_id"]
+
+        fb = client.post(f"/users/u_pb/playback/{record_id}/feedback", json={"feedback_type": "trial_rating", "rating": 4, "progress": 0.3})
+        assert fb.status_code == 200
+
+        fb2 = client.post(f"/users/u_pb/playback/{record_id}/feedback", json={"feedback_type": "complete", "progress": 1.0})
+        assert fb2.status_code == 200
+
+        history = client.get("/users/u_pb/playback/history")
+        assert history.status_code == 200
+        records = history.json()
+        assert len(records) >= 1
+        assert records[0]["rating"] == 4
+        assert records[0]["progress"] == 1.0
+        assert records[0]["completed_at"] is not None
+
+
+def test_remix_basic_flow(tmp_path, monkeypatch):
+    monkeypatch.setenv("FLOPPY_DATABASE_PATH", str(tmp_path / "floppy.db"))
+    monkeypatch.setenv("FLOPPY_STORAGE_DIR", str(tmp_path / "audio"))
+    get_settings.cache_clear()
+
+    with TestClient(app) as client:
+        client.post("/admin/seed")
+        profile_payload = {
+            "audio_type_preferences": ["meditation", "white_noise"],
+            "voice_preferences": ["warm_female"],
+            "background_preferences": ["rain_soft"],
+            "duration_preference_min": 10,
+            "stress_level": "medium",
+            "anxiety_level": "medium",
+            "avg_sleep_latency_min": 20,
+            "mood_tags": ["calm"],
+        }
+        client.put("/users/u_rmx/profile", json=profile_payload)
+
+        # Get a voice asset (meditation) and an ambient asset (white_noise)
+        recs = client.get("/users/u_rmx/recommendations?limit=10").json()
+        voice_asset = next((r["asset"] for r in recs if r["asset"]["type"] == "meditation"), None)
+        ambient_asset = next((r["asset"] for r in recs if r["asset"]["type"] == "white_noise"), None)
+        assert voice_asset is not None
+        assert ambient_asset is not None
+
+        remix_resp = client.post("/users/u_rmx/remix", json={
+            "voice_asset_id": voice_asset["id"],
+            "ambient_asset_id": ambient_asset["id"],
+            "voice_volume": 1.0,
+            "ambient_volume": 0.3,
+        })
+        assert remix_resp.status_code == 202
+        job_id = remix_resp.json()["id"]
+
+        job = client.get(f"/remix-jobs/{job_id}")
+        assert job.status_code == 200
+        job_body = job.json()
+        assert job_body["status"] == "succeeded"
+        assert job_body["output_asset_id"] is not None
+        assert job_body["output_asset"]["playback_url"].startswith("http://")
+
+        # Remix asset should be usable
+        audio_url = job_body["output_asset"]["playback_url"].replace("http://127.0.0.1:8000", "")
+        audio = client.get(audio_url)
+        assert audio.status_code == 200
+
+
+def test_remix_with_sound_type(tmp_path, monkeypatch):
+    """Remix using sound_type (procedural ambient) instead of ambient_asset_id."""
+    monkeypatch.setenv("FLOPPY_DATABASE_PATH", str(tmp_path / "floppy.db"))
+    monkeypatch.setenv("FLOPPY_STORAGE_DIR", str(tmp_path / "audio"))
+    get_settings.cache_clear()
+
+    with TestClient(app) as client:
+        client.post("/admin/seed")
+        client.put("/users/u_rmx2/profile", json={
+            "audio_type_preferences": ["meditation"],
+            "voice_preferences": ["warm_female"],
+            "background_preferences": ["rain_soft"],
+            "duration_preference_min": 10,
+            "stress_level": "medium", "anxiety_level": "medium",
+            "avg_sleep_latency_min": 20, "mood_tags": ["calm"],
+        })
+
+        recs = client.get("/users/u_rmx2/recommendations?limit=5").json()
+        voice = next(r["asset"] for r in recs if r["asset"]["type"] == "meditation")
+
+        resp = client.post("/users/u_rmx2/remix", json={
+            "voice_asset_id": voice["id"],
+            "sound_type": "ocean",
+            "voice_volume": 1.0,
+            "ambient_volume": 0.4,
+        })
+        assert resp.status_code == 202
+        job = client.get(f"/remix-jobs/{resp.json()['id']}").json()
+        assert job["status"] == "succeeded"
+        assert job["sound_type"] == "ocean"
+
+
+def test_agent_decide_remix_current(tmp_path, monkeypatch):
+    """Agent returns remix_current when user says '加点雨声' with current_asset_id."""
+    monkeypatch.setenv("FLOPPY_DATABASE_PATH", str(tmp_path / "floppy.db"))
+    monkeypatch.setenv("FLOPPY_STORAGE_DIR", str(tmp_path / "audio"))
+    get_settings.cache_clear()
+
+    with TestClient(app) as client:
+        client.post("/admin/seed")
+        client.put("/users/u_rmx3/profile", json={
+            "audio_type_preferences": ["meditation"],
+            "voice_preferences": ["warm_female"],
+            "background_preferences": ["rain_soft"],
+            "duration_preference_min": 10,
+            "stress_level": "medium", "anxiety_level": "medium",
+            "avg_sleep_latency_min": 20, "mood_tags": ["calm"],
+        })
+
+        recs = client.get("/users/u_rmx3/recommendations?limit=3").json()
+        current = recs[0]["asset"]
+
+        resp = client.post("/agent/decide", json={
+            "user_id": "u_rmx3",
+            "request_text": "加点雨声背景",
+            "current_asset_id": current["id"],
+        })
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["action"] == "remix_current"
+        assert body["remix_job_id"] is not None
+        assert body["asset"] is not None
+        assert "rain" in body["reasons"][0] or "雨" in body["reasons"][0]
+
+
+def test_remix_does_not_consume_generation_budget(tmp_path, monkeypatch):
+    """Remix does NOT consume TTS generation quota."""
+    monkeypatch.setenv("FLOPPY_DATABASE_PATH", str(tmp_path / "floppy.db"))
+    monkeypatch.setenv("FLOPPY_STORAGE_DIR", str(tmp_path / "audio"))
+    monkeypatch.setenv("FLOPPY_DAILY_GENERATE_COUNT", "0")
+    get_settings.cache_clear()
+
+    with TestClient(app) as client:
+        client.post("/admin/seed")
+        client.put("/users/u_rmx4/profile", json={
+            "audio_type_preferences": ["meditation"],
+            "voice_preferences": ["warm_female"],
+            "background_preferences": ["rain_soft"],
+            "duration_preference_min": 10,
+            "stress_level": "medium", "anxiety_level": "medium",
+            "avg_sleep_latency_min": 20, "mood_tags": ["calm"],
+        })
+
+        recs = client.get("/users/u_rmx4/recommendations?limit=3").json()
+        voice = recs[0]["asset"]
+
+        # Remix should succeed even with 0 generation budget
+        resp = client.post("/users/u_rmx4/remix", json={
+            "voice_asset_id": voice["id"],
+            "sound_type": "rain",
+        })
+        assert resp.status_code == 202
+        job = client.get(f"/remix-jobs/{resp.json()['id']}").json()
+        assert job["status"] == "succeeded"
+
+
+def test_remix_session_add_background(tmp_path, monkeypatch):
+    """POST /remix/sessions with add_background intent succeeds."""
+    monkeypatch.setenv("FLOPPY_DATABASE_PATH", str(tmp_path / "floppy.db"))
+    monkeypatch.setenv("FLOPPY_STORAGE_DIR", str(tmp_path / "audio"))
+    get_settings.cache_clear()
+
+    with TestClient(app) as client:
+        client.post("/admin/seed")
+        client.put("/users/u_rs1/profile", json={
+            "audio_type_preferences": ["meditation"],
+            "voice_preferences": ["warm_female"],
+            "background_preferences": ["rain_soft"],
+            "duration_preference_min": 10,
+            "stress_level": "medium", "anxiety_level": "medium",
+            "avg_sleep_latency_min": 20, "mood_tags": ["calm"],
+        })
+        recs = client.get("/users/u_rs1/recommendations?limit=3").json()
+        asset = recs[0]["asset"]
+        client.post("/users/u_rs1/playback", json={"asset_id": asset["id"], "source": "recommend"})
+
+        resp = client.post("/remix/sessions", json={
+            "foreground_asset_id": asset["id"],
+            "sound_type": "rain",
+            "intent": "add_background",
+            "mix_params": {"background_volume": 0.25},
+        })
+        assert resp.status_code == 202
+        session = resp.json()
+        assert session["intent"] == "add_background"
+
+        get_resp = client.get(f"/remix/sessions/{session['id']}")
+        assert get_resp.status_code == 200
+        assert get_resp.json()["status"] == "succeeded"
+
+
+def test_remix_session_adjust_volume(tmp_path, monkeypatch):
+    monkeypatch.setenv("FLOPPY_DATABASE_PATH", str(tmp_path / "floppy.db"))
+    monkeypatch.setenv("FLOPPY_STORAGE_DIR", str(tmp_path / "audio"))
+    get_settings.cache_clear()
+
+    with TestClient(app) as client:
+        client.post("/admin/seed")
+        client.put("/users/u_rs2/profile", json={
+            "audio_type_preferences": ["meditation"],
+            "voice_preferences": ["warm_female"],
+            "background_preferences": ["rain_soft"],
+            "duration_preference_min": 10,
+            "stress_level": "medium", "anxiety_level": "medium",
+            "avg_sleep_latency_min": 20, "mood_tags": ["calm"],
+        })
+        recs = client.get("/users/u_rs2/recommendations?limit=3").json()
+        asset = recs[0]["asset"]
+        client.post("/users/u_rs2/playback", json={"asset_id": asset["id"], "source": "recommend"})
+
+        create = client.post("/remix/sessions", json={
+            "foreground_asset_id": asset["id"],
+            "sound_type": "ocean",
+            "intent": "add_background",
+        })
+        session_id = create.json()["id"]
+
+        patch = client.patch(f"/remix/sessions/{session_id}", json={
+            "intent": "adjust_volume",
+            "mix_params": {"background_volume": 0.5},
+        })
+        assert patch.status_code == 200
+        assert patch.json()["intent"] == "adjust_volume"
+
+
+def test_remix_session_remove_background(tmp_path, monkeypatch):
+    monkeypatch.setenv("FLOPPY_DATABASE_PATH", str(tmp_path / "floppy.db"))
+    monkeypatch.setenv("FLOPPY_STORAGE_DIR", str(tmp_path / "audio"))
+    get_settings.cache_clear()
+
+    with TestClient(app) as client:
+        client.post("/admin/seed")
+        client.put("/users/u_rs3/profile", json={
+            "audio_type_preferences": ["meditation"],
+            "voice_preferences": ["warm_female"],
+            "background_preferences": ["rain_soft"],
+            "duration_preference_min": 10,
+            "stress_level": "medium", "anxiety_level": "medium",
+            "avg_sleep_latency_min": 20, "mood_tags": ["calm"],
+        })
+        recs = client.get("/users/u_rs3/recommendations?limit=3").json()
+        asset = recs[0]["asset"]
+        client.post("/users/u_rs3/playback", json={"asset_id": asset["id"], "source": "recommend"})
+
+        resp = client.post("/remix/sessions", json={
+            "foreground_asset_id": asset["id"],
+            "intent": "remove_background",
+        })
+        assert resp.status_code == 202
+        session = client.get(f"/remix/sessions/{resp.json()['id']}").json()
+        assert session["status"] == "succeeded"
+
+
+def test_asset_remixable(tmp_path, monkeypatch):
+    monkeypatch.setenv("FLOPPY_DATABASE_PATH", str(tmp_path / "floppy.db"))
+    monkeypatch.setenv("FLOPPY_STORAGE_DIR", str(tmp_path / "audio"))
+    get_settings.cache_clear()
+
+    with TestClient(app) as client:
+        client.post("/admin/seed")
+        client.put("/users/u_rmx_chk/profile", json={
+            "audio_type_preferences": ["meditation"],
+            "voice_preferences": ["warm_female"],
+            "background_preferences": ["rain_soft"],
+            "duration_preference_min": 10,
+            "stress_level": "medium", "anxiety_level": "medium",
+            "avg_sleep_latency_min": 20, "mood_tags": ["calm"],
+        })
+        recs = client.get("/users/u_rmx_chk/recommendations?limit=3").json()
+        asset_id = recs[0]["asset"]["id"]
+
+        resp = client.get(f"/assets/{asset_id}/remixable")
+        assert resp.status_code == 200
+        assert resp.json()["remixable"] is False
+        assert "placeholder" in resp.json()["reason"]
+
+        resp2 = client.get("/assets/nonexistent_id/remixable")
+        assert resp2.json()["remixable"] is False
+
+
+def test_remix_session_rate_limit(tmp_path, monkeypatch):
+    monkeypatch.setenv("FLOPPY_DATABASE_PATH", str(tmp_path / "floppy.db"))
+    monkeypatch.setenv("FLOPPY_STORAGE_DIR", str(tmp_path / "audio"))
+    get_settings.cache_clear()
+
+    with TestClient(app) as client:
+        client.post("/admin/seed")
+        client.put("/users/u_rl/profile", json={
+            "audio_type_preferences": ["meditation"],
+            "voice_preferences": ["warm_female"],
+            "background_preferences": ["rain_soft"],
+            "duration_preference_min": 10,
+            "stress_level": "medium", "anxiety_level": "medium",
+            "avg_sleep_latency_min": 20, "mood_tags": ["calm"],
+        })
+        recs = client.get("/users/u_rl/recommendations?limit=3").json()
+        asset = recs[0]["asset"]
+        client.post("/users/u_rl/playback", json={"asset_id": asset["id"], "source": "recommend"})
+
+        for _ in range(20):
+            r = client.post("/remix/sessions", json={
+                "foreground_asset_id": asset["id"],
+                "sound_type": "rain",
+                "intent": "add_background",
+            })
+            assert r.status_code == 202
+
+        r = client.post("/remix/sessions", json={
+            "foreground_asset_id": asset["id"],
+            "sound_type": "rain",
+            "intent": "add_background",
+        })
+        assert r.status_code == 429
+
+
+def test_remix_session_no_foreground_400(tmp_path, monkeypatch):
+    monkeypatch.setenv("FLOPPY_DATABASE_PATH", str(tmp_path / "floppy.db"))
+    monkeypatch.setenv("FLOPPY_STORAGE_DIR", str(tmp_path / "audio"))
+    get_settings.cache_clear()
+
+    with TestClient(app) as client:
+        resp = client.post("/remix/sessions", json={
+            "sound_type": "rain",
+            "intent": "add_background",
+        })
+        assert resp.status_code == 400

@@ -4,8 +4,11 @@
 
 ## 前端对接
 
+- [frontend/backend_api_reference.md](frontend/backend_api_reference.md)  
+  前端完整后端接口文档：覆盖全部路由（画像、问卷、检索/推荐/生成、Agent 决策、播放/反馈、Remix），含请求/响应、枚举、状态码、最小接入流程。给前端对接用的主文档。
+
 - [frontend/demo_integration.md](frontend/demo_integration.md)  
-  Demo 页面接入说明：`/demo/chat` 请求/响应、页面状态、播放器字段、当前能力边界。
+  Demo 页面接入说明：`/demo/chat` 请求/响应、页面状态、播放器字段、当前能力边界。快速上手用。
 
 ## 当前契约
 

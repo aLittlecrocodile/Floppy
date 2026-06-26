@@ -9,4 +9,6 @@ data/
 storage/
 .env
 .ccb/
+.ccb-ducc-ccb
+.comate/
 .DS_Store
