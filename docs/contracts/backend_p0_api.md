@@ -22,6 +22,7 @@ Base URL: `http://127.0.0.1:8000`
 | POST | `/agent/decide` | Agent decision endpoint |
 | POST | `/demo/chat` | Demo chat endpoint |
 | GET | `/audio/{object_key}` | Stream audio file |
+| WS | `/voice/ws` | 实时语音对话（全双工）— 见 [`voice_dialog_ws.md`](./voice_dialog_ws.md) |
 
 ---
 

@@ -121,6 +121,29 @@ export FLOPPY_MINIMAX_BASE_URL="https://api.minimaxi.com"
 
 当前 MiniMax provider 已支持短文本 T2A HTTP，也提供 T2A Async 创建任务、查询状态和下载文件能力。默认短文本走 HTTP，超过 `FLOPPY_MINIMAX_SYNC_MAX_CHARS` 会走 async 等待并下载。
 
+### MiniMax Hubless ASMR Workflow
+
+已提供不依赖 MiniMax Hub App/MCP 的直连工具层：`floppy_backend.services.minimax_hubless.MiniMaxHublessAudioTools`。
+
+它覆盖 `asmr-ambient` workflow 里关键的 MCP 语义：`get_voice_id`、`audio_generation`、`audios_batch_generation`、`music_generation_instrumental`、`audio_meta` 和 `ffmpeg_mix`。背景音乐使用 MiniMax `music_generation` 的 `is_instrumental=true`，混音使用本地 `ffmpeg`。
+
+启用 agent 生成任务里的 TTS + 纯音乐混音：
+
+```bash
+export FLOPPY_AUDIO_PROVIDER=minimax
+export FLOPPY_MINIMAX_API_KEY="<your_key>"
+export FLOPPY_MINIMAX_BASE_URL="https://api.minimaxi.com"
+export FLOPPY_MINIMAX_ENABLE_MUSIC_MIX=true
+```
+
+只跑 Hubless smoke：
+
+```bash
+.venv/bin/python scripts/minimax_hubless_smoke.py
+```
+
+详细映射见 `docs/contracts/minimax_hubless_audio_tools.md`。
+
 ## Engineering Notes
 
 当前 MVP 使用标准库 `sqlite3`，避免早期引入重 ORM。模块边界按未来服务拆分设计：

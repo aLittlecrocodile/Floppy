@@ -7,12 +7,13 @@ from floppy_backend.config import Settings
 from floppy_backend.models import AssetSearchRequest, AudioAsset, AudioAssetIn, AudioScript, EventIn, GenerationJobCreateResponse, GenerationRequest, GenerationResponse, NormalizedAudioRequest
 from floppy_backend.providers.audio import AudioGenerationProvider, GeneratedAudio
 from floppy_backend.repositories import Repository
+from floppy_backend.services.minimax_hubless import build_sleep_music_prompt, ffmpeg_mix, probe_audio
 from floppy_backend.services import script_guard
 from floppy_backend.services.normalizer import RequestNormalizer
 from floppy_backend.services.recommendation import RecommendationService
 from floppy_backend.services.script import SleepScriptService
 from floppy_backend.storage import LocalFileStorage
-from floppy_backend.utils import sha256_json, text_embedding
+from floppy_backend.utils import sha256_json, sha256_text, text_embedding
 
 
 @dataclass(frozen=True)
@@ -203,7 +204,14 @@ class GenerationService:
         profile = self.repository.get_profile(user_id)
         started = time.perf_counter()
         output_ext = "mp3" if self.provider.name == "minimax_t2a" else "wav"
-        object_key = f"ondemand/{user_id}/{prepared.cache_key[:16]}.{output_ext}"
+        music_mix_enabled = (
+            self.provider.name == "minimax_t2a"
+            and self._settings is not None
+            and self._settings.minimax_enable_music_mix
+            and hasattr(self.provider, "generate_instrumental_music")
+        )
+        suffix = "_voice" if music_mix_enabled else ""
+        object_key = f"ondemand/{user_id}/{prepared.cache_key[:16]}{suffix}.{output_ext}"
         path = self.storage.path_for(object_key)
         generated = self.provider.generate(
             prepared.normalized,
@@ -212,6 +220,8 @@ class GenerationService:
             script_text=prepared.script.script_text if prepared.script else None,
             title=prepared.script.title if prepared.script else None,
         )
+        if music_mix_enabled:
+            generated = self._mix_minimax_music_layer(user_id, prepared, generated)
         latency_ms = int((time.perf_counter() - started) * 1000)
         asset = self.repository.upsert_asset(
             AudioAssetIn(
@@ -242,6 +252,58 @@ class GenerationService:
         )
         asset.playback_url = self.storage.public_url(asset.object_key)
         return asset, latency_ms, generated
+
+    def _mix_minimax_music_layer(self, user_id: str, prepared: PreparedGeneration, speech: GeneratedAudio) -> GeneratedAudio:
+        if self._settings is None:
+            return speech
+        base = prepared.cache_key[:16]
+        music_key = f"ondemand/{user_id}/{base}_music.mp3"
+        mixed_key = f"ondemand/{user_id}/{base}.mp3"
+        music_path = self.storage.path_for(music_key)
+        mixed_path = self.storage.path_for(mixed_key)
+        music_prompt = build_sleep_music_prompt(prepared.normalized)
+        music = self.provider.generate_instrumental_music(  # type: ignore[attr-defined]
+            music_prompt,
+            music_path,
+            music_key,
+            title=f"{speech.title} background",
+        )
+        mixed_meta = ffmpeg_mix(
+            speech.path,
+            music.path,
+            mixed_path,
+            foreground_volume=self._settings.minimax_voice_mix_volume,
+            background_volume=self._settings.minimax_music_mix_volume,
+        )
+        if mixed_meta.duration_sec <= 0:
+            mixed_meta = probe_audio(mixed_path)
+        payload = {
+            "speech": speech.provider_payload,
+            "music": music.provider_payload,
+            "mix": {
+                "music_prompt": music_prompt,
+                "voice_object_key": speech.object_key,
+                "music_object_key": music.object_key,
+                "mixed_object_key": mixed_key,
+                "duration_sec": mixed_meta.duration_sec,
+                "voice_volume": self._settings.minimax_voice_mix_volume,
+                "music_volume": self._settings.minimax_music_mix_volume,
+            },
+        }
+        return GeneratedAudio(
+            object_key=mixed_key,
+            path=mixed_path,
+            duration_sec=max(1, int(mixed_meta.duration_sec)),
+            title=speech.title,
+            content_hash=sha256_text(mixed_path.read_bytes().hex()),
+            provider_model=f"{speech.provider_model}+{music.provider_model}",
+            provider_task_id=speech.provider_task_id,
+            provider_file_id=speech.provider_file_id,
+            provider_status="succeeded",
+            provider_payload=payload,
+            usage_characters=speech.usage_characters,
+            estimated_cost_usd=speech.estimated_cost_usd,
+        )
 
     def _mark_succeeded(self, job_id: str, asset: AudioAsset, latency_ms: int, script: AudioScript | None, generated: GeneratedAudio) -> None:
         self.repository.update_generation_job(

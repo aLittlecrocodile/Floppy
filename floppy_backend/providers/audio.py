@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from floppy_backend.config import Settings
-from floppy_backend.models import NormalizedAudioRequest
+from floppy_backend.models import AudioType, NormalizedAudioRequest
 from floppy_backend.providers.ambient import detect_sound_type, generate_ambient_wav
 from floppy_backend.utils import sha256_text
 from floppy_backend.voice_profiles import resolve_voice_id
@@ -31,6 +31,18 @@ class GeneratedAudio:
     provider_payload: dict | None = None
     usage_characters: int | None = None
     estimated_cost_usd: float | None = None
+
+
+@dataclass(frozen=True)
+class GeneratedMusic:
+    object_key: str
+    path: Path
+    duration_sec: int
+    title: str
+    content_hash: str
+    provider_model: str
+    provider_status: str
+    provider_payload: dict | None = None
 
 
 class AudioGenerationProvider:
@@ -120,6 +132,43 @@ class LocalToneAudioProvider(AudioGenerationProvider):
     def _title(self, normalized: NormalizedAudioRequest) -> str:
         topics = "、".join(normalized.content_topic[:2]) if normalized.content_topic else "今晚"
         return f"{topics} {normalized.intent.value} · {normalized.background}"
+
+
+def build_voice_setting(
+    settings: Settings,
+    *,
+    voice_style: str | None = None,
+    voice_id: str | None = None,
+) -> dict:
+    """Construct a MiniMax voice_setting dict from style/profile/config defaults.
+
+    Shared by the HTTP T2A provider and the streaming WebSocket provider so both
+    resolve voice_id/emotion/speed/pitch the same way.
+    """
+    if voice_id:
+        profile = {"voice_id": voice_id, "speed": settings.minimax_speed, "emotion": settings.minimax_emotion}
+    else:
+        profile = resolve_voice_id(voice_style, settings.minimax_voice_id)
+    voice_setting = {
+        "voice_id": profile["voice_id"],
+        "speed": profile.get("speed", settings.minimax_speed),
+        "vol": settings.minimax_volume,
+        "pitch": settings.minimax_pitch,
+    }
+    emotion = profile.get("emotion", settings.minimax_emotion)
+    if emotion:
+        voice_setting["emotion"] = emotion
+    return voice_setting
+
+
+def build_audio_setting(settings: Settings) -> dict:
+    """Construct a MiniMax audio_setting dict (mp3) from config defaults."""
+    return {
+        "sample_rate": settings.minimax_sample_rate,
+        "bitrate": settings.minimax_bitrate,
+        "format": "mp3",
+        "channel": settings.minimax_channel,
+    }
 
 
 class ProviderConfigurationError(RuntimeError):
@@ -300,6 +349,118 @@ class MiniMaxTTSProvider(AudioGenerationProvider):
             estimated_cost_usd=self.estimate_cost(usage_characters, self.settings.minimax_model),
         )
 
+    def list_voices(self, voice_type: str = "all") -> dict:
+        response = self._post_json("/v1/get_voice", {"voice_type": voice_type})
+        base_resp = response.get("base_resp") or {}
+        if base_resp.get("status_code") not in (0, None):
+            self._raise_base_resp_error(base_resp, "MiniMax get_voice request failed")
+        return response
+
+    def generate_text_to_file(
+        self,
+        text: str,
+        output_path: Path,
+        object_key: str,
+        *,
+        voice_style: str | None = None,
+        voice_id: str | None = None,
+        title: str | None = None,
+    ) -> GeneratedAudio:
+        if len(text) > self.settings.minimax_sync_max_chars and voice_id is None:
+            normalized = NormalizedAudioRequest(
+                intent=AudioType.STORY,
+                duration_bucket="custom",
+                duration_sec=self._estimate_duration_from_text(text),
+                voice_style=voice_style or "warm_female",
+                background="custom",
+                mood=[],
+                content_topic=[],
+            )
+            return self.generate_async_and_wait(normalized, output_path, object_key, script_text=text, title=title)
+
+        payload = self._build_payload(text, voice_style=voice_style, voice_id=voice_id)
+        response = self._post_json("/v1/t2a_v2", payload)
+        base_resp = response.get("base_resp") or {}
+        if base_resp.get("status_code") not in (0, None):
+            self._raise_base_resp_error(base_resp, "MiniMax T2A request failed")
+
+        audio_hex = ((response.get("data") or {}).get("audio") or "").strip()
+        if not audio_hex:
+            raise ProviderAPIError("MiniMax T2A response did not include audio data")
+
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_bytes(bytes.fromhex(audio_hex))
+        extra = response.get("extra_info") or {}
+        usage_characters = extra.get("usage_characters") or len(text)
+        return GeneratedAudio(
+            object_key=object_key,
+            path=output_path,
+            duration_sec=max(1, int((extra.get("audio_length") or self._estimate_duration_from_text(text) * 1000) / 1000)),
+            title=title or "MiniMax speech",
+            content_hash=sha256_text(output_path.read_bytes().hex()),
+            provider_model=self.settings.minimax_model,
+            provider_status="succeeded",
+            provider_payload={
+                "trace_id": response.get("trace_id"),
+                "extra_info": extra,
+                "base_resp": base_resp,
+            },
+            usage_characters=usage_characters,
+            estimated_cost_usd=self.estimate_cost(usage_characters, self.settings.minimax_model),
+        )
+
+    def generate_instrumental_music(
+        self,
+        prompt: str,
+        output_path: Path,
+        object_key: str,
+        *,
+        title: str | None = None,
+        model: str | None = None,
+    ) -> GeneratedMusic:
+        music_model = model or self.settings.minimax_music_model
+        payload = {
+            "model": music_model,
+            "prompt": prompt,
+            "stream": False,
+            "output_format": "hex",
+            "is_instrumental": True,
+            "audio_setting": {
+                "sample_rate": self.settings.minimax_music_sample_rate,
+                "bitrate": self.settings.minimax_music_bitrate,
+                "format": "mp3",
+            },
+        }
+        response = self._post_json("/v1/music_generation", payload, timeout=180)
+        base_resp = response.get("base_resp") or {}
+        if base_resp.get("status_code") not in (0, None):
+            self._raise_base_resp_error(base_resp, "MiniMax music_generation request failed")
+
+        data = response.get("data") or {}
+        audio_hex = (data.get("audio") or "").strip()
+        if not audio_hex:
+            raise ProviderAPIError("MiniMax music_generation response did not include audio data")
+
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_bytes(bytes.fromhex(audio_hex))
+        extra = response.get("extra_info") or {}
+        return GeneratedMusic(
+            object_key=object_key,
+            path=output_path,
+            duration_sec=max(1, int((extra.get("music_duration") or 0) / 1000)),
+            title=title or "MiniMax instrumental music",
+            content_hash=sha256_text(output_path.read_bytes().hex()),
+            provider_model=music_model,
+            provider_status="succeeded",
+            provider_payload={
+                "trace_id": response.get("trace_id"),
+                "extra_info": extra,
+                "analysis_info": response.get("analysis_info"),
+                "base_resp": base_resp,
+                "data_status": data.get("status"),
+            },
+        )
+
     def estimate_cost(self, usage_characters: int, model: str) -> float:
         price = self.COST_PER_MILLION_CHARS.get(model, 100.0)
         return round((usage_characters / 1_000_000) * price, 6)
@@ -311,33 +472,18 @@ class MiniMaxTTSProvider(AudioGenerationProvider):
             status_msg += " (hint: Chinese-account keys require FLOPPY_MINIMAX_BASE_URL=https://api.minimaxi.com)"
         raise ProviderAPIError(status_msg, status_code=status_code)
 
-    def _build_payload(self, text: str, voice_style: str | None = None) -> dict:
-        profile = resolve_voice_id(voice_style, self.settings.minimax_voice_id)
-        voice_setting = {
-            "voice_id": profile["voice_id"],
-            "speed": profile.get("speed", self.settings.minimax_speed),
-            "vol": self.settings.minimax_volume,
-            "pitch": self.settings.minimax_pitch,
-        }
-        emotion = profile.get("emotion", self.settings.minimax_emotion)
-        if emotion:
-            voice_setting["emotion"] = emotion
+    def _build_payload(self, text: str, voice_style: str | None = None, voice_id: str | None = None) -> dict:
         return {
             "model": self.settings.minimax_model,
             "text": text,
             "stream": False,
             "language_boost": "auto",
             "output_format": "hex",
-            "voice_setting": voice_setting,
-            "audio_setting": {
-                "sample_rate": self.settings.minimax_sample_rate,
-                "bitrate": self.settings.minimax_bitrate,
-                "format": "mp3",
-                "channel": self.settings.minimax_channel,
-            },
+            "voice_setting": build_voice_setting(self.settings, voice_style=voice_style, voice_id=voice_id),
+            "audio_setting": build_audio_setting(self.settings),
         }
 
-    def _post_json(self, path: str, payload: dict) -> dict:
+    def _post_json(self, path: str, payload: dict, timeout: float = 60) -> dict:
         url = f"{self.settings.minimax_base_url.rstrip('/')}{path}"
         request = urllib.request.Request(
             url,
@@ -349,7 +495,7 @@ class MiniMaxTTSProvider(AudioGenerationProvider):
             method="POST",
         )
         try:
-            with urllib.request.urlopen(request, timeout=60) as response:
+            with urllib.request.urlopen(request, timeout=timeout) as response:
                 return json.loads(response.read().decode("utf-8"))
         except urllib.error.HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace")

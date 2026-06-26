@@ -2,9 +2,11 @@ from __future__ import annotations
 
 from contextlib import asynccontextmanager
 from pathlib import Path
+import asyncio
+import json
 import time
 
-from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException
+from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, HTMLResponse
 
 from floppy_backend.config import Settings, get_settings
@@ -129,6 +131,85 @@ def storage() -> LocalFileStorage:
 @app.get("/health")
 def health(settings: Settings = Depends(get_settings)):
     return {"status": "ok", "app": settings.app_name}
+
+
+@app.websocket("/voice/ws")
+async def voice_ws(websocket: WebSocket):
+    """Realtime full-duplex voice dialog.
+
+    Protocol (see docs/contracts/voice_dialog_ws.md):
+      - Client connects with ?token=<shared-secret> when FLOPPY_VOICE_WS_TOKEN is set.
+      - Client sends binary frames = raw PCM (16k/mono/16bit) audio chunks.
+      - Client sends text frame {"type":"stop"} to end the audio stream.
+      - Server sends text frames for transcripts/assistant text/control, and
+        binary frames for TTS audio (mp3 chunks).
+    """
+    settings = get_settings()
+    token = websocket.query_params.get("token")
+    if settings.voice_ws_token and token != settings.voice_ws_token:
+        await websocket.close(code=4401)
+        return
+    await websocket.accept()
+
+    # Lazy imports keep optional voice deps out of the core startup path.
+    from floppy_backend.providers.minimax_stream_tts import MiniMaxStreamTTS
+    from floppy_backend.providers.volc_asr import VolcStreamASR
+    from floppy_backend.services.dialog_llm import DialogLLM
+    from floppy_backend.services.voice_session import EVENT_AUDIO, OutboundEvent, VoiceSession
+
+    try:
+        session = VoiceSession(
+            asr=VolcStreamASR(settings),
+            llm=DialogLLM(settings),
+            tts=MiniMaxStreamTTS(settings),
+            voice_style=websocket.query_params.get("voice_style"),
+        )
+    except Exception as exc:  # noqa: BLE001 — config/credential errors
+        await websocket.send_text(json.dumps({"type": "error", "text": str(exc)}))
+        await websocket.close(code=1011)
+        return
+
+    audio_queue: asyncio.Queue[bytes | None] = asyncio.Queue()
+
+    async def _audio_in():
+        while True:
+            chunk = await audio_queue.get()
+            if chunk is None:
+                return
+            yield chunk
+
+    async def _emit(event: OutboundEvent) -> None:
+        if event.type == EVENT_AUDIO and event.audio is not None:
+            await websocket.send_bytes(event.audio)
+        else:
+            await websocket.send_text(
+                json.dumps({"type": event.type, "text": event.text, "is_final": event.is_final}, ensure_ascii=False)
+            )
+
+    session_task = asyncio.create_task(session.run(_audio_in(), _emit))
+    try:
+        while True:
+            message = await websocket.receive()
+            if message.get("type") == "websocket.disconnect":
+                break
+            if (data := message.get("bytes")) is not None:
+                await audio_queue.put(data)
+            elif (text := message.get("text")) is not None:
+                try:
+                    ctrl = json.loads(text)
+                except json.JSONDecodeError:
+                    continue
+                if ctrl.get("type") == "stop":
+                    await audio_queue.put(None)
+                    break
+    except WebSocketDisconnect:
+        pass
+    finally:
+        await audio_queue.put(None)
+        try:
+            await asyncio.wait_for(session_task, timeout=30)
+        except (asyncio.TimeoutError, asyncio.CancelledError):
+            session_task.cancel()
 
 
 @app.get("/demo", response_class=HTMLResponse)

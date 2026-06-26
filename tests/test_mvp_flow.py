@@ -12,7 +12,7 @@ import pytest
 from floppy_backend.config import Settings, get_settings
 from floppy_backend.db import connect, initialize
 from floppy_backend.main import app, state
-from floppy_backend.models import AudioAssetIn, AudioType, GenerationRequest
+from floppy_backend.models import AudioAssetIn, AudioType, GenerationRequest, NormalizedAudioRequest
 from floppy_backend.providers.audio import LocalToneAudioProvider, MiniMaxTTSProvider, ProviderAPIError, ProviderConfigurationError, build_audio_provider
 from floppy_backend.repositories import Repository
 from floppy_backend.services.normalizer import RequestNormalizer
@@ -263,6 +263,151 @@ def test_minimax_estimate_cost():
     assert cost == 100.0
     cost_turbo = provider.estimate_cost(500_000, "speech-2.8-turbo")
     assert cost_turbo == 30.0
+
+
+def test_minimax_list_voices_calls_get_voice():
+    settings = Settings(minimax_api_key="test-key")
+    provider = MiniMaxTTSProvider(settings)
+    response = {
+        "system_voice": [{"voice_id": "Chinese (Mandarin)_Warm_Bestie"}],
+        "base_resp": {"status_code": 0},
+    }
+
+    with unittest.mock.patch.object(provider, "_post_json", return_value=response) as post_json:
+        voices = provider.list_voices("system")
+
+    assert voices["system_voice"][0]["voice_id"] == "Chinese (Mandarin)_Warm_Bestie"
+    post_json.assert_called_once_with("/v1/get_voice", {"voice_type": "system"})
+
+
+def test_minimax_instrumental_music_generation_writes_audio(tmp_path):
+    settings = Settings(minimax_api_key="test-key", minimax_music_model="music-2.6-free")
+    provider = MiniMaxTTSProvider(settings)
+    fake_audio_hex = bytes([0xFF, 0xFB] + [1] * 32).hex()
+    response = {
+        "data": {"audio": fake_audio_hex, "status": 2},
+        "extra_info": {"music_duration": 25000, "music_sample_rate": 44100},
+        "trace_id": "trace-music",
+        "base_resp": {"status_code": 0},
+    }
+
+    with unittest.mock.patch.object(provider, "_post_json", return_value=response) as post_json:
+        result = provider.generate_instrumental_music("slow ambient sleep music", tmp_path / "music.mp3", "music/key.mp3")
+
+    path, payload = post_json.call_args.args
+    assert path == "/v1/music_generation"
+    assert payload["model"] == "music-2.6-free"
+    assert payload["is_instrumental"] is True
+    assert payload["output_format"] == "hex"
+    assert result.path.read_bytes() == bytes.fromhex(fake_audio_hex)
+    assert result.duration_sec == 25
+    assert result.provider_payload["data_status"] == 2
+
+
+def test_hubless_get_voice_id_uses_local_profile():
+    from floppy_backend.services.minimax_hubless import MiniMaxHublessAudioTools
+
+    tools = MiniMaxHublessAudioTools(Settings(minimax_api_key="test-key"))
+    voice = tools.get_voice_id("whisper_female")
+
+    assert voice["source"] == "voice_profile"
+    assert voice["voice_id"] == "Chinese (Mandarin)_Warm_Girl"
+
+
+def test_hubless_music_prompt_uses_background_and_intent():
+    from floppy_backend.services.minimax_hubless import build_sleep_music_prompt
+
+    normalized = NormalizedAudioRequest(
+        intent=AudioType.ASMR,
+        duration_bucket="short",
+        duration_sec=120,
+        voice_style="whisper_female",
+        background="rain_soft",
+        mood=["calm"],
+        content_topic=["雨夜"],
+    )
+
+    prompt = build_sleep_music_prompt(normalized)
+
+    assert "rainy night" in prompt
+    assert "asmr bed layer" in prompt
+    assert "雨夜" in prompt
+
+
+def test_minimax_music_mix_replaces_voice_asset_with_mixed_asset(tmp_path):
+    from floppy_backend.providers.audio import GeneratedAudio, GeneratedMusic
+    from floppy_backend.services.generation import GenerationService, PreparedGeneration
+    from floppy_backend.services.minimax_hubless import AudioMeta
+    from floppy_backend.storage import LocalFileStorage
+
+    class DummyMiniMaxProvider:
+        name = "minimax_t2a"
+
+        def generate_instrumental_music(self, prompt, output_path, object_key, *, title=None):
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path.write_bytes(b"music-bytes")
+            return GeneratedMusic(
+                object_key=object_key,
+                path=output_path,
+                duration_sec=10,
+                title=title or "music",
+                content_hash="music-hash",
+                provider_model="music-2.6",
+                provider_status="succeeded",
+                provider_payload={"trace_id": "music-trace"},
+            )
+
+    storage = LocalFileStorage(tmp_path / "audio", public_base_url="http://test")
+    settings = Settings(minimax_api_key="test-key", minimax_enable_music_mix=True)
+    service = GenerationService(None, storage, DummyMiniMaxProvider(), None, None, None, settings)  # type: ignore[arg-type]
+    normalized = NormalizedAudioRequest(
+        intent=AudioType.STORY,
+        duration_bucket="short",
+        duration_sec=120,
+        voice_style="warm_female",
+        background="rain_soft",
+        mood=["calm"],
+        content_topic=["书店"],
+    )
+    prepared = PreparedGeneration(normalized=normalized, cache_key="a" * 64, cached_asset=None, match_type="generated")
+    speech_path = storage.path_for("ondemand/u_test/aaaaaaaaaaaaaaaa_voice.mp3")
+    speech_path.parent.mkdir(parents=True, exist_ok=True)
+    speech_path.write_bytes(b"speech-bytes")
+    speech = GeneratedAudio(
+        object_key="ondemand/u_test/aaaaaaaaaaaaaaaa_voice.mp3",
+        path=speech_path,
+        duration_sec=10,
+        title="voice",
+        content_hash="speech-hash",
+        provider_model="speech-2.8-hd",
+        provider_status="succeeded",
+        provider_payload={"trace_id": "speech-trace"},
+        usage_characters=100,
+        estimated_cost_usd=0.01,
+    )
+
+    def fake_mix(foreground_path, background_path, output_path, **kwargs):
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_bytes(b"mixed-bytes")
+        return AudioMeta(
+            path=output_path,
+            duration_sec=9.5,
+            format_name="mp3",
+            codec_name="mp3",
+            sample_rate=44100,
+            channels=1,
+            bit_rate=192000,
+            size_bytes=11,
+        )
+
+    with unittest.mock.patch("floppy_backend.services.generation.ffmpeg_mix", side_effect=fake_mix):
+        mixed = service._mix_minimax_music_layer("u_test", prepared, speech)
+
+    assert mixed.object_key == "ondemand/u_test/aaaaaaaaaaaaaaaa.mp3"
+    assert mixed.path.read_bytes() == b"mixed-bytes"
+    assert mixed.provider_model == "speech-2.8-hd+music-2.6"
+    assert mixed.usage_characters == 100
+    assert mixed.provider_payload["mix"]["music_object_key"].endswith("_music.mp3")
 
 
 def test_minimax_provider_failure_recorded_on_job(tmp_path, monkeypatch):
