@@ -149,10 +149,48 @@ class Recommendation(BaseModel):
     reasons: list[str]
 
 
+class GenerationDirective(BaseModel):
+    """Structured generation instruction produced by the agent (LLM) before
+    it commands the workflow. Carries the *content intent* (outline + key
+    elements) that template-based normalization throws away, so the workflow
+    can write a personalized script instead of selecting a generic template.
+
+    All fields optional/defaulted: an empty directive (or a None one) lets the
+    workflow fall back to the existing templates, keeping the old path intact.
+    """
+    intent: AudioType | None = None
+    tone: str | None = None                              # 基调，如 "温柔平静"
+    duration_sec: int | None = Field(default=None, ge=30, le=3600)
+    voice_style: str | None = None
+    content_brief: str = ""                              # 一句话主题
+    outline: list[str] = Field(default_factory=list)     # 分段要点
+    key_elements: list[str] = Field(default_factory=list)  # 必含意象，如「祖母/老花园」
+    confidence: float = 1.0
+    source: str = "agent"                                # "agent" | "agent_fallback"
+
+    @property
+    def has_outline(self) -> bool:
+        return bool(self.outline) or bool(self.content_brief)
+
+    def cache_signature(self) -> dict:
+        """Stable subset for cache_key — excludes free-form outline text so
+        minor LLM wording drift doesn't tank the cache hit rate. Same need
+        (intent/duration/voice/brief/elements) → same key → cache hit."""
+        return {
+            "intent": self.intent.value if self.intent else None,
+            "tone": (self.tone or "").strip(),
+            "duration_sec": self.duration_sec,
+            "voice_style": self.voice_style,
+            "content_brief": self.content_brief.strip(),
+            "key_elements": sorted(e.strip() for e in self.key_elements if e.strip()),
+        }
+
+
 class GenerationRequest(BaseModel):
     request_text: str = Field(min_length=2, max_length=1000)
     duration_preference_min: int | None = Field(default=None, ge=5, le=60)
     force_generate: bool = False
+    directive: GenerationDirective | None = None
 
 
 class NormalizedAudioRequest(BaseModel):
@@ -197,6 +235,7 @@ class GenerationJob(BaseModel):
     error_code: str | None = None
     error_message: str | None = None
     latency_ms: int | None = None
+    directive: GenerationDirective | None = None
     created_at: datetime
     updated_at: datetime
     asset: AudioAsset | None = None
@@ -232,6 +271,15 @@ class PlannerMeta(BaseModel):
     fallback_reason: str | None = None
 
 
+class AgentToolCall(BaseModel):
+    name: str
+    status: str
+    input: dict[str, Any] = Field(default_factory=dict)
+    output: dict[str, Any] | None = None
+    latency_ms: int = 0
+    reason: str | None = None
+
+
 class AgentDecideResponse(BaseModel):
     action: str  # play_asset | generate_job | remix_current | no_match
     normalized_request: NormalizedAudioRequest
@@ -242,6 +290,8 @@ class AgentDecideResponse(BaseModel):
     remix_job_id: str | None = None
     reasons: list[str]
     planner_meta: PlannerMeta | None = None
+    selected_skill: str | None = None
+    tool_calls: list[AgentToolCall] = Field(default_factory=list)
 
 
 # --- P0: Questionnaire ---

@@ -9,7 +9,8 @@ class RequestNormalizer:
     def normalize(self, request: GenerationRequest, profile: UserProfile | None) -> NormalizedAudioRequest:
         text = request.request_text.lower()
         intent = self._intent(text, profile)
-        duration_min = request.duration_preference_min or self._duration_from_text(text) or (profile.duration_preference_min if profile else 15)
+        explicit_duration_min = request.duration_preference_min or self._duration_from_text(text)
+        duration_min = explicit_duration_min or self._default_duration(intent, profile)
         voice_style = self._voice(text, profile)
         background = self._background(text, profile)
         mood = self._mood(text, profile)
@@ -44,6 +45,11 @@ class RequestNormalizer:
         if match:
             return max(5, min(60, int(match.group(1))))
         return None
+
+    def _default_duration(self, intent: AudioType, profile: UserProfile | None) -> int:
+        if intent == AudioType.MEDITATION:
+            return 20
+        return profile.duration_preference_min if profile else 15
 
     def _duration_bucket(self, duration_min: int) -> str:
         if duration_min <= 10:

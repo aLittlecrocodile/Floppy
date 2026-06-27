@@ -97,6 +97,7 @@ CREATE TABLE IF NOT EXISTS generation_jobs (
     error_code TEXT,
     error_message TEXT,
     latency_ms INTEGER,
+    directive_json TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
@@ -204,6 +205,7 @@ def _migrate(conn: sqlite3.Connection) -> None:
         "error_message": "TEXT",
         "target_duration_sec": "INTEGER",
         "actual_duration_sec": "INTEGER",
+        "directive_json": "TEXT",
     }
     for column, definition in job_additions.items():
         if column not in job_cols:

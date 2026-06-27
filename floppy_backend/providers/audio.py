@@ -69,8 +69,9 @@ class LocalToneAudioProvider(AudioGenerationProvider):
 
     name = "local_tone_v1"
 
-    def __init__(self, delay_sec: float = 0.0):
+    def __init__(self, delay_sec: float = 0.0, max_duration_sec: int | None = None):
         self.delay_sec = delay_sec
+        self.max_duration_sec = max_duration_sec
 
     def generate(
         self,
@@ -83,7 +84,9 @@ class LocalToneAudioProvider(AudioGenerationProvider):
     ) -> GeneratedAudio:
         if self.delay_sec > 0:
             time.sleep(self.delay_sec)
-        duration_sec = min(normalized.duration_sec, 120 if normalized.intent.value in ("white_noise", "music") else 20)
+        default_cap = 120 if normalized.intent.value in ("white_noise", "music") else 20
+        duration_cap = min(default_cap, max(1, self.max_duration_sec)) if self.max_duration_sec else default_cap
+        duration_sec = min(normalized.duration_sec, duration_cap)
         output_path.parent.mkdir(parents=True, exist_ok=True)
 
         # Use procedural ambient for white_noise/music
@@ -568,7 +571,7 @@ class MiniMaxTTSProvider(AudioGenerationProvider):
 def build_audio_provider(settings: Settings) -> AudioGenerationProvider:
     provider = settings.audio_provider.strip().lower()
     if provider in {"local", "local_tone"}:
-        return LocalToneAudioProvider(delay_sec=settings.local_provider_delay_sec)
+        return LocalToneAudioProvider(delay_sec=settings.local_provider_delay_sec, max_duration_sec=settings.local_provider_max_duration_sec)
     if provider == "minimax":
         return MiniMaxTTSProvider(settings)
     raise ProviderConfigurationError(f"Unsupported FLOPPY_AUDIO_PROVIDER={settings.audio_provider!r}")

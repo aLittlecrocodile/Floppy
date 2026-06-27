@@ -2,9 +2,19 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from floppy_backend.models import AudioScriptIn, AudioType, NormalizedAudioRequest, UserProfile
+from floppy_backend.models import (
+    AudioScriptIn,
+    AudioType,
+    GenerationDirective,
+    NormalizedAudioRequest,
+    UserProfile,
+)
 from floppy_backend.services import script_guard
+from floppy_backend.services.script_writer import LLMScriptWriter
 from floppy_backend.utils import sha256_text
+
+MEDITATION_MIN_TARGET_RATIO = 0.92
+MEDITATION_MAX_READABLE_CHARS = 1_650
 
 
 @dataclass(frozen=True)
@@ -35,20 +45,63 @@ class SleepScript:
 
 
 class SleepScriptService:
-    """Deterministic first-pass script generator for provider integration.
+    """Script generator for provider integration.
 
-    The real product can later swap this for an LLM-backed implementation. This
-    service still owns the contract: low-stimulation text, MiniMax pause marks,
-    stable hashing, and content-type-specific rhythm.
+    Two paths, same contract (low-stimulation text, MiniMax pause marks, stable
+    hashing, content-type rhythm):
+
+    - **directive with outline** → an LLMScriptWriter writes a personalized
+      script from the agent's content points (the smart path). If the LLM is
+      unavailable or its output fails the guard, we silently fall back to ...
+    - **no directive / fallback** → the deterministic templates below (the safe
+      path that always works, never breaks the old flow).
     """
 
-    def generate(self, normalized: NormalizedAudioRequest, profile: UserProfile | None = None) -> SleepScript:
+    def __init__(self, script_writer: LLMScriptWriter | None = None):
+        self._writer = script_writer
+
+    def generate(
+        self,
+        normalized: NormalizedAudioRequest,
+        profile: UserProfile | None = None,
+        directive: GenerationDirective | None = None,
+    ) -> SleepScript:
+        if directive is not None and directive.has_outline and self._writer is not None:
+            llm_script = self._try_llm_script(normalized, directive)
+            if llm_script is not None:
+                return llm_script
+
         content_type = normalized.intent
         if content_type == AudioType.MEDITATION:
             return self._meditation(normalized, profile)
         if content_type == AudioType.ASMR:
             return self._asmr(normalized, profile)
         return self._story(normalized, profile)
+
+    def _try_llm_script(
+        self, normalized: NormalizedAudioRequest, directive: GenerationDirective
+    ) -> SleepScript | None:
+        """Write a script from the directive's outline; None → caller falls back."""
+        intent = directive.intent or normalized.intent
+        duration = directive.duration_sec or normalized.duration_sec
+        written = self._writer.write(directive, intent, duration)
+        if written is None:
+            return None
+        title, script_text = written
+        # Reuse the same build path (guard + hashing) as templates. If the LLM
+        # script trips script_guard (e.g. medical claim slipped in), reject it
+        # so the caller falls back to a known-safe template.
+        candidate = self._build(title, script_text, normalized, self._pause_density_for(intent))
+        if candidate.safety_status != "approved":
+            return None
+        return candidate
+
+    @staticmethod
+    def _pause_density_for(intent: AudioType) -> str:
+        return {
+            AudioType.ASMR: "very_high",
+            AudioType.MEDITATION: "high",
+        }.get(intent, "medium")
 
     def _story(self, normalized: NormalizedAudioRequest, profile: UserProfile | None) -> SleepScript:
         topic = self._topic_label(normalized)
@@ -87,6 +140,7 @@ class SleepScriptService:
             "接下来，我会少说一些话。<#4#>把更多安静留给你。<#8#>",
             "很好。<#5#>就这样。<#8#>",
         ]
+        body = self._extend_meditation(body, normalized.duration_sec, background)
         return self._build(title, "\n\n".join(body), normalized, "high")
 
     def _asmr(self, normalized: NormalizedAudioRequest, profile: UserProfile | None) -> SleepScript:
@@ -150,6 +204,47 @@ class SleepScriptService:
             except ValueError:
                 continue
         return max(30, int(readable_chars / 3.2 + pause_seconds))
+
+    def _extend_meditation(self, body: list[str], target_duration_sec: int, background: str) -> list[str]:
+        if target_duration_sec <= 0:
+            return body
+
+        target = int(target_duration_sec * MEDITATION_MIN_TARGET_RATIO)
+        if self._estimate_duration("\n\n".join(body)) >= target:
+            return body
+
+        cycles = [
+            "把注意力放在鼻尖。<#8#>吸气的时候，知道自己正在吸气。<#8#>呼气的时候，知道自己正在呼气。<#10#>",
+            "让肩膀再松一点。<#8#>让背部也慢慢放宽。<#8#>身体不需要支撑什么。<#10#>",
+            "感受胸口轻轻起伏。<#8#>不用控制它。<#8#>只是陪着这一点点起伏。<#10#>",
+            "如果有念头经过，也没关系。<#8#>看见它。<#6#>然后，让它像云一样慢慢走远。<#10#>",
+            f"想象{background}在远处继续陪着你。<#8#>声音很轻。<#8#>节奏很慢。<#10#>",
+            "把注意力带到双手。<#8#>手指放松。<#8#>掌心放松。<#10#>",
+            "把注意力带到腹部。<#8#>吸气时，腹部微微鼓起。<#8#>呼气时，腹部慢慢落下。<#10#>",
+            "把注意力带到双腿。<#8#>大腿放松。<#8#>小腿放松。<#8#>脚背和脚趾也放松。<#10#>",
+            "现在，只听见呼吸。<#8#>只感觉身体。<#8#>这一刻，已经足够安静。<#10#>",
+            "吸气。<#8#>停一停。<#6#>呼气。<#10#>让呼气比吸气更慢一点。<#10#>",
+            "你不需要做得很好。<#8#>也不需要追求任何结果。<#8#>只是休息。<#10#>",
+            "让脸颊变软。<#8#>让眼皮变沉。<#8#>让下颌自然地松开。<#10#>",
+        ]
+
+        extended = list(body[:-2])
+        index = 0
+        while self._estimate_duration("\n\n".join(extended + body[-2:])) < target:
+            if self._readable_chars("\n\n".join(extended)) >= MEDITATION_MAX_READABLE_CHARS:
+                break
+            extended.append(cycles[index % len(cycles)])
+            index += 1
+
+        extended.extend([
+            "接下来的时间，话会越来越少。<#10#>你可以继续听，也可以让声音慢慢退到远处。<#12#>",
+            "如果你还醒着，就回到呼吸。<#10#>吸气。<#8#>呼气。<#12#>",
+            "很好。<#10#>现在，把剩下的安静留给身体。<#15#>",
+        ])
+        return extended
+
+    def _readable_chars(self, text: str) -> int:
+        return sum(1 for char in text if "\u4e00" <= char <= "\u9fff" or char.isalnum())
 
     def _topic_label(self, normalized: NormalizedAudioRequest) -> str:
         labels = {

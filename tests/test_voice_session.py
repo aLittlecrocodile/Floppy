@@ -15,11 +15,25 @@ from floppy_backend.services.dialog_llm import DialogTurn
 from floppy_backend.services.voice_session import (
     EVENT_ASSISTANT_TEXT,
     EVENT_AUDIO,
+    EVENT_SESSION_STARTED,
     EVENT_TURN_END,
     EVENT_USER_TEXT,
     OutboundEvent,
     VoiceSession,
 )
+
+
+def test_volc_asr_prefers_api_key_headers():
+    from floppy_backend.config import Settings
+    from floppy_backend.providers.volc_asr import VolcStreamASR
+
+    asr = VolcStreamASR(Settings(volc_asr_api_key="api-key-test", volc_asr_app_key="app", volc_asr_access_key="access"))
+    headers = asr._headers()
+
+    assert headers["X-Api-Key"] == "api-key-test"
+    assert "X-Api-App-Key" not in headers
+    assert "X-Api-Access-Key" not in headers
+    assert headers["X-Api-Resource-Id"] == "volc.bigasr.sauc.duration"
 
 
 class FakeASRResult:
@@ -127,6 +141,29 @@ def test_partial_results_do_not_trigger_response():
 
     # LLM called exactly once, only for the final result.
     assert llm.calls == ["我睡不着"]
+
+
+def test_events_include_session_turn_and_sequence_metadata():
+    asr = FakeASR([FakeASRResult("我睡", is_final=False), FakeASRResult("我睡不着", is_final=True)])
+    llm = FakeLLM(["好。"])
+    session = VoiceSession(asr=asr, llm=llm, tts=FakeTTS(), session_id="vs_test", user_id="u_test")
+
+    started = session.start_event()
+    events = asyncio.run(_collect(session, [b"x"]))
+    text_events = [started, *[e for e in events if e.type != EVENT_AUDIO]]
+    user_events = [e for e in text_events if e.type == EVENT_USER_TEXT]
+    assistant_event = next(e for e in text_events if e.type == EVENT_ASSISTANT_TEXT)
+    turn_end = next(e for e in text_events if e.type == EVENT_TURN_END)
+
+    assert started.type == EVENT_SESSION_STARTED
+    assert {e.session_id for e in text_events} == {"vs_test"}
+    assert {e.user_id for e in text_events} == {"u_test"}
+    assert [e.seq for e in text_events] == sorted(e.seq for e in text_events)
+    assert all(e.created_at for e in text_events)
+    assert user_events[0].turn_id == user_events[1].turn_id
+    assert assistant_event.turn_id == user_events[1].turn_id
+    assert turn_end.turn_id == user_events[1].turn_id
+    assert user_events[0].text_payload()["session_id"] == "vs_test"
 
 
 def test_barge_in_cancels_in_flight_turn():

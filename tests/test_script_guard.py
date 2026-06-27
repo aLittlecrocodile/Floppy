@@ -133,6 +133,15 @@ class TestMeditationScript:
         script = svc.generate(_normalized(AudioType.MEDITATION))
         assert "no_medical_claim" in script.safety_notes or all("medical" not in n for n in script.safety_notes)
 
+    def test_twenty_minute_meditation_target_is_not_short(self):
+        svc = SleepScriptService()
+        script = svc.generate(_normalized(AudioType.MEDITATION, duration_sec=1200))
+        result = script_guard.check(script.script_text, script.estimated_duration_sec)
+        assert result.safe, f"Meditation safety violations: {result.violations}"
+        assert result.quality_ok, f"Meditation quality notes: {result.quality_notes}"
+        assert script.estimated_duration_sec >= 1100
+        assert script.estimated_duration_sec <= 1200
+
 
 class TestAsmrScript:
     def test_approved_and_very_high_pause_density(self):

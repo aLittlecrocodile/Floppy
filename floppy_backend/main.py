@@ -58,7 +58,6 @@ from floppy_backend.services.remix import RemixService
 from floppy_backend.services.script import SleepScriptService
 from floppy_backend.services.agent_graph import AgentGraphBuilder
 from floppy_backend.storage import LocalFileStorage
-from floppy_backend.utils import sha256_json
 
 
 class AppState:
@@ -69,6 +68,7 @@ class AppState:
     generation_service: GenerationService
     remix_service: RemixService
     agent_graph: AgentGraphBuilder
+    agent_runtime: object
 
 
 state = AppState()
@@ -86,13 +86,41 @@ async def lifespan(app: FastAPI):
     state.storage = storage
     state.profile_service = ProfileService(repository)
     state.recommendation_service = recommendation_service
+
+    # Resolve a shared LLM credential for the directive planner + script writer.
+    # They reuse the query planner / dialog creds; falls back to template-only
+    # generation when no key is configured.
+    _llm_key = settings.query_planner_api_key or settings.dialog_llm_api_key
+    _llm_base = settings.dialog_llm_base_url or settings.query_planner_base_url
+    _llm_model = settings.dialog_llm_model or settings.query_planner_model
+    script_writer = None
+    directive_planner = None
+    if settings.directive_planner_enabled and _llm_key:
+        from floppy_backend.services.directive_planner import DirectivePlanner
+        from floppy_backend.services.script_writer import LLMScriptWriter
+        script_writer = LLMScriptWriter(
+            api_key=_llm_key,
+            base_url=_llm_base,
+            model=_llm_model,
+            timeout_sec=settings.script_writer_timeout_sec,
+            max_tokens=settings.script_writer_max_tokens,
+        )
+        directive_planner = DirectivePlanner(
+            api_key=_llm_key,
+            base_url=_llm_base,
+            model=_llm_model,
+            timeout_sec=settings.directive_planner_timeout_sec,
+            max_tokens=settings.directive_planner_max_tokens,
+            confidence_threshold=settings.directive_planner_confidence_threshold,
+        )
+
     state.generation_service = GenerationService(
         repository=repository,
         storage=storage,
         provider=build_audio_provider(settings),
         normalizer=RequestNormalizer(),
         recommendation_service=recommendation_service,
-        script_service=SleepScriptService(),
+        script_service=SleepScriptService(script_writer=script_writer),
         settings=settings,
     )
     state.remix_service = RemixService(repository, storage)
@@ -112,7 +140,30 @@ async def lifespan(app: FastAPI):
             max_tokens=settings.query_planner_max_tokens,
         ),
         remix_service=state.remix_service,
+        directive_planner=directive_planner,
     )
+    if settings.agent_runtime == "local":
+        state.agent_runtime = state.agent_graph
+    elif settings.agent_runtime == "hermes":
+        from floppy_backend.services.hermes_agent import HermesAgentRuntime
+        state.agent_runtime = HermesAgentRuntime(
+            repository=repository,
+            storage=storage,
+            normalizer=state.generation_service.normalizer,
+            recommendation_service=recommendation_service,
+            generation_service=state.generation_service,
+            remix_service=state.remix_service,
+            settings=settings,
+            local_agent=state.agent_graph,
+        )
+    else:
+        raise RuntimeError(f"unsupported FLOPPY_AGENT_RUNTIME={settings.agent_runtime!r}")
+    # Seed the catalog once at startup (idempotent) so voice/demo requests
+    # don't pay the ~60s seeding cost on their first call.
+    try:
+        seed_assets(repository, storage, max_duration_sec=settings.local_provider_max_duration_sec)
+    except Exception:  # noqa: BLE001 — seeding is best-effort at startup
+        pass
     yield
     conn.close()
 
@@ -133,6 +184,54 @@ def health(settings: Settings = Depends(get_settings)):
     return {"status": "ok", "app": settings.app_name}
 
 
+def _ensure_demo_profile(user_id: str) -> None:
+    """Make sure a user has a profile (catalog is seeded at startup).
+
+    Voice dialog and /demo/chat both need a profile for agent_graph to run;
+    new ad-hoc users (e.g. a browser session) get a sensible sleep default.
+    """
+    if state.repository.get_profile(user_id) is None:
+        state.profile_service.upsert_profile(
+            user_id,
+            UserProfileIn(
+                audio_type_preferences=[AudioType.MEDITATION, AudioType.WHITE_NOISE, AudioType.STORY],
+                voice_preferences=["warm_female"],
+                background_preferences=["rain_soft"],
+                duration_preference_min=15,
+                stress_level=ProfileLevel.HIGH,
+                anxiety_level=ProfileLevel.HIGH,
+                avg_sleep_latency_min=40,
+                mood_tags=["anxiety_relief"],
+            ),
+        )
+
+
+def _resolve_audio_asset(user_id: str, request_text: str) -> dict | None:
+    """Run agent_graph to match/generate a playable sleep-audio asset.
+
+    Returns {"url", "title", "audio_type"} or None. Mirrors /demo/chat's
+    play_asset / generate_job handling. Runs synchronously (call via
+    asyncio.to_thread from the async ws handler).
+    """
+    response = state.agent_runtime.run(
+        AgentDecideRequest(user_id=user_id, request_text=request_text, generation_allowed=True)
+    )
+    if response.action == "play_asset" and response.asset:
+        return {"url": response.asset.playback_url, "title": response.asset.title}
+    if response.action == "generate_job" and response.job_id:
+        state.generation_service.run_job(
+            response.job_id, user_id, GenerationRequest(request_text=request_text, force_generate=True)
+        )
+        for _ in range(10):
+            job = state.repository.get_generation_job(response.job_id)
+            if job and job.status in {"succeeded", "failed"}:
+                if job.status == "succeeded" and job.asset:
+                    return {"url": state.storage.public_url(job.asset.object_key), "title": job.asset.title}
+                break
+            time.sleep(0.2)
+    return None
+
+
 @app.websocket("/voice/ws")
 async def voice_ws(websocket: WebSocket):
     """Realtime full-duplex voice dialog.
@@ -140,12 +239,16 @@ async def voice_ws(websocket: WebSocket):
     Protocol (see docs/contracts/voice_dialog_ws.md):
       - Client connects with ?token=<shared-secret> when FLOPPY_VOICE_WS_TOKEN is set.
       - Client sends binary frames = raw PCM (16k/mono/16bit) audio chunks.
-      - Client sends text frame {"type":"stop"} to end the audio stream.
+      - Client sends {"type":"utterance_end"} to finalize the CURRENT utterance
+        (triggers recognition + reply) while keeping the connection open for the
+        next turn — multi-turn dialog with shared history.
+      - Client sends {"type":"stop"} to end the whole session.
       - Server sends text frames for transcripts/assistant text/control, and
         binary frames for TTS audio (mp3 chunks).
     """
     settings = get_settings()
     token = websocket.query_params.get("token")
+    user_id = websocket.query_params.get("user_id")
     if settings.voice_ws_token and token != settings.voice_ws_token:
         await websocket.close(code=4401)
         return
@@ -157,64 +260,99 @@ async def voice_ws(websocket: WebSocket):
     from floppy_backend.services.dialog_llm import DialogLLM
     from floppy_backend.services.voice_session import EVENT_AUDIO, OutboundEvent, VoiceSession
 
+    # Resolve a sleep-audio asset via agent_graph (off the event loop).
+    resolve_user_id = user_id or "voice_demo_user"
+    await asyncio.to_thread(_ensure_demo_profile, resolve_user_id)
+
+    async def _audio_resolver(request_text: str, audio_type: str) -> dict | None:
+        asset = await asyncio.to_thread(_resolve_audio_asset, resolve_user_id, request_text)
+        if asset:
+            asset.setdefault("audio_type", audio_type)
+        return asset
+
     try:
         session = VoiceSession(
             asr=VolcStreamASR(settings),
             llm=DialogLLM(settings),
             tts=MiniMaxStreamTTS(settings),
+            user_id=user_id,
             voice_style=websocket.query_params.get("voice_style"),
+            audio_resolver=_audio_resolver,
         )
     except Exception as exc:  # noqa: BLE001 — config/credential errors
         await websocket.send_text(json.dumps({"type": "error", "text": str(exc)}))
         await websocket.close(code=1011)
         return
 
-    audio_queue: asyncio.Queue[bytes | None] = asyncio.Queue()
-
-    async def _audio_in():
-        while True:
-            chunk = await audio_queue.get()
-            if chunk is None:
-                return
-            yield chunk
-
     async def _emit(event: OutboundEvent) -> None:
         if event.type == EVENT_AUDIO and event.audio is not None:
             await websocket.send_bytes(event.audio)
         else:
-            await websocket.send_text(
-                json.dumps({"type": event.type, "text": event.text, "is_final": event.is_final}, ensure_ascii=False)
-            )
+            await websocket.send_text(json.dumps(event.text_payload(), ensure_ascii=False))
 
-    session_task = asyncio.create_task(session.run(_audio_in(), _emit))
+    await _emit(session.start_event())
+
+    # One audio queue per utterance; a new queue starts when the previous
+    # utterance is finalized. The session processes utterances serially.
+    audio_queue: asyncio.Queue[bytes | None] = asyncio.Queue()
+    utterance_task: asyncio.Task | None = None
+
+    async def _audio_in(queue: asyncio.Queue[bytes | None]):
+        while True:
+            chunk = await queue.get()
+            if chunk is None:
+                return
+            yield chunk
+
     try:
         while True:
             message = await websocket.receive()
             if message.get("type") == "websocket.disconnect":
                 break
             if (data := message.get("bytes")) is not None:
+                # Start an utterance lazily on first audio frame.
+                if utterance_task is None or utterance_task.done():
+                    audio_queue = asyncio.Queue()
+                    utterance_task = asyncio.create_task(session.run_utterance(_audio_in(audio_queue), _emit))
                 await audio_queue.put(data)
             elif (text := message.get("text")) is not None:
                 try:
                     ctrl = json.loads(text)
                 except json.JSONDecodeError:
                     continue
-                if ctrl.get("type") == "stop":
+                ctrl_type = ctrl.get("type")
+                if ctrl_type == "utterance_end":
+                    # Finalize current utterance; wait for the full reply so the
+                    # next utterance sees updated history.
                     await audio_queue.put(None)
+                    if utterance_task:
+                        await utterance_task
+                elif ctrl_type == "stop":
+                    await audio_queue.put(None)
+                    if utterance_task:
+                        await utterance_task
                     break
     except WebSocketDisconnect:
         pass
     finally:
         await audio_queue.put(None)
-        try:
-            await asyncio.wait_for(session_task, timeout=30)
-        except (asyncio.TimeoutError, asyncio.CancelledError):
-            session_task.cancel()
+        if utterance_task and not utterance_task.done():
+            try:
+                await asyncio.wait_for(utterance_task, timeout=30)
+            except (asyncio.TimeoutError, asyncio.CancelledError):
+                utterance_task.cancel()
 
 
 @app.get("/demo", response_class=HTMLResponse)
 def demo_page():
     return DEMO_HTML
+
+
+@app.get("/voice", response_class=HTMLResponse)
+def voice_page():
+    from floppy_backend.voice_page import VOICE_HTML
+    from floppy_backend.voice_script import VOICE_SCRIPT
+    return VOICE_HTML.replace("__SCRIPT__", VOICE_SCRIPT)
 
 
 @app.post("/demo/chat")
@@ -223,7 +361,7 @@ def demo_chat(payload: dict):
     if len(request_text) < 2:
         raise HTTPException(status_code=400, detail="request_text is required")
 
-    seed_assets(state.repository, state.storage)
+    seed_assets(state.repository, state.storage, max_duration_sec=get_settings().local_provider_max_duration_sec)
     demo_user = "demo_user"
     state.profile_service.upsert_profile(
         demo_user,
@@ -239,7 +377,7 @@ def demo_chat(payload: dict):
         ),
     )
 
-    response = state.agent_graph.run(AgentDecideRequest(user_id=demo_user, request_text=request_text, generation_allowed=True))
+    response = state.agent_runtime.run(AgentDecideRequest(user_id=demo_user, request_text=request_text, generation_allowed=True))
     audio_url = response.asset.playback_url if response.asset else None
 
     job = None
@@ -273,7 +411,7 @@ def demo_chat(payload: dict):
 
 @app.post("/admin/seed")
 def seed():
-    created = seed_assets(state.repository, state.storage)
+    created = seed_assets(state.repository, state.storage, max_duration_sec=get_settings().local_provider_max_duration_sec)
     return {"created_or_updated": created}
 
 
@@ -317,7 +455,7 @@ def normalize_request(payload: NormalizeRequestIn, repository: Repository = Depe
         GenerationRequest(request_text=payload.request_text, duration_preference_min=payload.duration_preference_min),
         profile,
     )
-    return NormalizedRequestOut(normalized_request=normalized, cache_key=sha256_json(normalized.model_dump(mode="json")))
+    return NormalizedRequestOut(normalized_request=normalized, cache_key=state.generation_service.cache_key_for(normalized))
 
 
 @app.post("/assets/search", response_model=AssetSearchResponse)
@@ -374,7 +512,7 @@ def record_event(user_id: str, event: EventIn, repository: Repository = Depends(
 @app.post("/agent/decide", response_model=AgentDecideResponse)
 def agent_decide(req: AgentDecideRequest, background_tasks: BackgroundTasks):
     try:
-        response = state.agent_graph.run(req)
+        response = state.agent_runtime.run(req)
     except BudgetExceededError as exc:
         raise HTTPException(status_code=429, detail=str(exc)) from exc
     except ValueError as exc:

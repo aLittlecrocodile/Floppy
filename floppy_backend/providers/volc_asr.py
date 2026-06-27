@@ -1,11 +1,18 @@
 """Volcengine large-model streaming ASR over WebSocket.
 
-Implements the binary protocol for wss://openspeech.bytedance.com/api/v3/sauc/bigmodel
-(豆包 / bigmodel sauc). Accepts a stream of raw PCM (16k, mono, int16) audio
-chunks and yields recognition results as they arrive.
+Implements the binary protocol for the 豆包大模型流式语音识别 (bigmodel sauc):
+  - wss://openspeech.bytedance.com/api/v3/sauc/bigmodel_async  (双向流式优化版，推荐)
+  - wss://openspeech.bytedance.com/api/v3/sauc/bigmodel        (基础双向流式)
 
-The server returns CUMULATIVE text, so each ASRResult.text is the full
-utterance so far (not a delta). is_final marks the last packet.
+Accepts a stream of raw PCM (16k, mono, int16) audio chunks and yields
+recognition results as they arrive.
+
+The server returns CUMULATIVE text in `result.text` (full utterance so far).
+Sentence finality is signalled by `result.utterances[].definite=true` (a VAD/
+semantic sentence boundary), which we map to ASRResult.is_final.
+
+Auth (新版控制台): single `X-Api-Key` header.
+Auth (旧版控制台): `X-Api-App-Key` + `X-Api-Access-Key`.
 
 Docs: https://www.volcengine.com/docs/6561/1354869
 """
@@ -26,6 +33,7 @@ from floppy_backend.config import Settings
 _PROTOCOL_VERSION = 0b0001
 _HEADER_SIZE = 0b0001  # in 4-byte units -> 4-byte header
 _JSON_SERIALIZATION = 0b0001
+_NO_SERIALIZATION = 0b0000
 _GZIP_COMPRESSION = 0b0001
 
 _FULL_CLIENT_REQUEST = 0b0001
@@ -33,9 +41,10 @@ _AUDIO_ONLY_REQUEST = 0b0010
 _FULL_SERVER_RESPONSE = 0b1001
 _SERVER_ERROR_RESPONSE = 0b1111
 
-_POS_SEQUENCE = 0b0001
-_NO_SEQUENCE = 0b0000
-_NEG_SEQUENCE = 0b0010  # last package
+# message-type-specific flags
+_FLAG_POS_SEQUENCE = 0b0001   # header 后 4 字节为正 sequence number
+_FLAG_LAST_NO_SEQ = 0b0010    # 最后一包（负包），header 后无 sequence
+_FLAG_NONE = 0b0000
 
 
 @dataclass(frozen=True)
@@ -48,77 +57,119 @@ class VolcASRError(RuntimeError):
     pass
 
 
-def _build_header(message_type: int, flags: int) -> bytearray:
+def _build_header(message_type: int, flags: int, serialization: int = _JSON_SERIALIZATION) -> bytearray:
     hdr = bytearray(4)
     hdr[0] = (_PROTOCOL_VERSION << 4) | _HEADER_SIZE
     hdr[1] = (message_type << 4) | flags
-    hdr[2] = (_JSON_SERIALIZATION << 4) | _GZIP_COMPRESSION
+    hdr[2] = (serialization << 4) | _GZIP_COMPRESSION
     hdr[3] = 0x00
     return hdr
 
 
-def _full_client_request(payload: dict, sequence: int = 1) -> bytes:
+def _full_client_request(payload: dict) -> bytes:
+    """First frame: JSON config, gzipped, with a positive sequence number."""
     body = gzip.compress(json.dumps(payload).encode("utf-8"))
-    pkt = _build_header(_FULL_CLIENT_REQUEST, _POS_SEQUENCE)
-    pkt.extend(sequence.to_bytes(4, "big", signed=True))
+    pkt = _build_header(_FULL_CLIENT_REQUEST, _FLAG_POS_SEQUENCE)
+    pkt.extend((1).to_bytes(4, "big", signed=True))  # sequence = 1
     pkt.extend(len(body).to_bytes(4, "big"))
     pkt.extend(body)
     return bytes(pkt)
 
 
 def _audio_request(audio: bytes, *, is_last: bool) -> bytes:
+    """Audio-only frame: raw (non-serialized) gzipped audio. Last packet flagged."""
     body = gzip.compress(audio)
-    pkt = _build_header(_AUDIO_ONLY_REQUEST, _NEG_SEQUENCE if is_last else _NO_SEQUENCE)
+    flags = _FLAG_LAST_NO_SEQ if is_last else _FLAG_NONE
+    pkt = _build_header(_AUDIO_ONLY_REQUEST, flags, serialization=_NO_SERIALIZATION)
     pkt.extend(len(body).to_bytes(4, "big"))
     pkt.extend(body)
     return bytes(pkt)
 
 
+def _safe_json(body: bytes) -> dict:
+    """Decode a payload to JSON, tolerating empty / non-JSON trailing frames."""
+    if not body:
+        return {}
+    text = body.decode("utf-8", errors="replace").strip()
+    if not text:
+        return {}
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        return {}
+
+
+def _maybe_gunzip(body: bytes, compression: int) -> bytes:
+    """Decompress if gzip flagged, but tolerate servers that send plain JSON
+    despite the gzip bit (observed on bigmodel_async)."""
+    if not body:
+        return body
+    if compression == _GZIP_COMPRESSION:
+        try:
+            return gzip.decompress(body)
+        except (OSError, gzip.BadGzipFile):
+            return body  # already uncompressed
+    return body
+
+
 def _parse_response(data: bytes) -> dict:
+    """Parse a server frame.
+
+    Layout for full_server_response: Header(4B) + Sequence(4B) + PayloadSize(4B) + Payload.
+    For error response: Header(4B) + ErrorCode(4B) + MsgSize(4B) + Msg.
+    """
     header_size = data[0] & 0x0F
     message_type = data[1] >> 4
     flags = data[1] & 0x0F
     compression = data[2] & 0x0F
-    payload = data[header_size * 4:]
-    result: dict = {"is_last": bool(flags & 0x02), "message_type": message_type}
-
-    if flags & 0x01:  # leading sequence number
-        result["sequence"] = int.from_bytes(payload[:4], "big", signed=True)
-        payload = payload[4:]
+    offset = header_size * 4
+    result: dict = {"message_type": message_type, "flags": flags}
 
     if message_type == _FULL_SERVER_RESPONSE:
-        size = int.from_bytes(payload[:4], "big", signed=True)
-        body = payload[4:4 + size]
-        if compression == _GZIP_COMPRESSION:
-            body = gzip.decompress(body)
-        result["payload"] = json.loads(body.decode("utf-8"))
+        sequence = int.from_bytes(data[offset:offset + 4], "big", signed=True)
+        offset += 4
+        result["sequence"] = sequence
+        # negative sequence => last package
+        result["is_last"] = sequence < 0 or bool(flags & _FLAG_LAST_NO_SEQ)
+        size = int.from_bytes(data[offset:offset + 4], "big")
+        offset += 4
+        body = _maybe_gunzip(data[offset:offset + size], compression)
+        result["payload"] = _safe_json(body)
     elif message_type == _SERVER_ERROR_RESPONSE:
-        result["error_code"] = int.from_bytes(payload[:4], "big", signed=False)
-        size = int.from_bytes(payload[4:8], "big", signed=False)
-        body = payload[8:8 + size]
-        if compression == _GZIP_COMPRESSION:
-            body = gzip.decompress(body)
+        result["error_code"] = int.from_bytes(data[offset:offset + 4], "big")
+        offset += 4
+        size = int.from_bytes(data[offset:offset + 4], "big")
+        offset += 4
+        body = _maybe_gunzip(data[offset:offset + size], compression)
         result["error_msg"] = body.decode("utf-8", errors="replace")
     return result
 
 
 class VolcStreamASR:
-    """Streaming ASR client over Volcengine WebSocket."""
+    """Streaming ASR client over Volcengine WebSocket (bigmodel sauc)."""
 
     def __init__(self, settings: Settings):
-        if not (settings.volc_asr_app_key and settings.volc_asr_access_key):
+        has_new = bool(settings.volc_asr_api_key)
+        has_old = bool(settings.volc_asr_app_key and settings.volc_asr_access_key)
+        if not (has_new or has_old):
             raise VolcASRError(
-                "Volcengine ASR requires FLOPPY_VOLC_ASR_APP_KEY and FLOPPY_VOLC_ASR_ACCESS_KEY"
+                "Volcengine ASR requires FLOPPY_VOLC_ASR_API_KEY (新版控制台), "
+                "or FLOPPY_VOLC_ASR_APP_KEY + FLOPPY_VOLC_ASR_ACCESS_KEY (旧版控制台)"
             )
         self._settings = settings
 
     def _headers(self) -> dict[str, str]:
-        return {
-            "X-Api-App-Key": self._settings.volc_asr_app_key,
-            "X-Api-Access-Key": self._settings.volc_asr_access_key,
+        headers = {
             "X-Api-Resource-Id": self._settings.volc_asr_resource_id,
+            "X-Api-Connect-Id": str(uuid.uuid4()),
             "X-Api-Request-Id": str(uuid.uuid4()),
         }
+        if self._settings.volc_asr_api_key:  # 新版控制台
+            headers["X-Api-Key"] = self._settings.volc_asr_api_key
+        else:  # 旧版控制台
+            headers["X-Api-App-Key"] = self._settings.volc_asr_app_key or ""
+            headers["X-Api-Access-Key"] = self._settings.volc_asr_access_key or ""
+        return headers
 
     def _init_payload(self) -> dict:
         return {
@@ -132,26 +183,37 @@ class VolcStreamASR:
             },
             "request": {
                 "model_name": "bigmodel",
-                "enable_punc": True,
                 "enable_itn": True,
-                "result_type": "single",
+                "enable_punc": True,
+                "show_utterances": True,   # needed for definite (sentence finality)
+                "result_type": "single",   # incremental results
+                "end_window_size": 800,    # 800ms 静音判停 -> definite=true
             },
         }
 
     @staticmethod
-    def _extract_text(payload: dict) -> str:
+    def _extract(payload: dict) -> tuple[str, bool]:
+        """Return (cumulative_text, is_sentence_final).
+
+        result is a dict: {"text": "...", "utterances": [{"definite": bool, ...}]}.
+        is_final is true when the latest utterance is marked definite.
+        """
         result = payload.get("result")
-        if isinstance(result, dict):
-            return str(result.get("text") or "")
-        if isinstance(result, list) and result:
-            return str(result[0].get("text") or "")
-        return ""
+        if not isinstance(result, dict):
+            return "", False
+        text = str(result.get("text") or "")
+        definite = False
+        utterances = result.get("utterances")
+        if isinstance(utterances, list) and utterances:
+            definite = bool(utterances[-1].get("definite"))
+        return text, definite
 
     async def stream_recognize(self, audio_iter: AsyncIterator[bytes]) -> AsyncIterator[ASRResult]:
         """Recognize a stream of PCM audio chunks, yielding cumulative results.
 
-        Runs the audio sender and response receiver concurrently so partial
-        results surface while audio is still being pushed.
+        Sends the config frame, then pumps audio while concurrently receiving
+        results. Each yielded ASRResult.text is cumulative; is_final marks a
+        finalized sentence (definite) or the last packet.
         """
         import asyncio
 
@@ -161,17 +223,23 @@ class VolcStreamASR:
             queue: asyncio.Queue[ASRResult | None] = asyncio.Queue()
 
             async def _send() -> None:
-                chunks: list[bytes] = []
+                # Stream each chunk as it arrives; mark the final one. We can't
+                # know which chunk is last until the iterator ends, so we hold
+                # one chunk back and flush it as the last packet.
+                prev: bytes | None = None
+                sent_any = False
                 async for chunk in audio_iter:
-                    chunks.append(chunk)
-                # Drain: send all but last as non-final, last as final.
-                if not chunks:
+                    if prev is not None:
+                        await ws.send(_audio_request(prev, is_last=False))
+                        sent_any = True
+                    prev = chunk
+                if prev is not None:
+                    await ws.send(_audio_request(prev, is_last=True))
+                elif not sent_any:
                     await ws.send(_audio_request(b"", is_last=True))
-                    return
-                for index, chunk in enumerate(chunks):
-                    await ws.send(_audio_request(chunk, is_last=(index == len(chunks) - 1)))
 
             async def _recv() -> None:
+                last_text = ""
                 try:
                     while True:
                         raw = await ws.recv()
@@ -182,15 +250,21 @@ class VolcStreamASR:
                             raise VolcASRError(
                                 f"Volc ASR error {parsed.get('error_code')}: {parsed.get('error_msg')}"
                             )
-                        payload = parsed.get("payload") or {}
-                        text = self._extract_text(payload)
-                        is_final = parsed["is_last"]
-                        if text or is_final:
-                            await queue.put(ASRResult(text=text, is_final=is_final))
-                        if is_final:
+                        text, definite = self._extract(parsed.get("payload") or {})
+                        is_last = parsed.get("is_last", False)
+                        # The final (negative) packet often carries an empty
+                        # payload — don't let it wipe the text we already have.
+                        if text:
+                            last_text = text
+                        if text or definite:
+                            await queue.put(ASRResult(text=text, is_final=definite))
+                        if is_last:
+                            # Emit a final marker carrying the best text so far.
+                            await queue.put(ASRResult(text=last_text, is_final=True))
                             break
                 except websockets.ConnectionClosed:
-                    pass
+                    if last_text:
+                        await queue.put(ASRResult(text=last_text, is_final=True))
                 finally:
                     await queue.put(None)
 
