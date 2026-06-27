@@ -4,7 +4,7 @@ import sqlite3
 from datetime import datetime, timedelta
 from threading import RLock
 
-from floppy_backend.models import AudioAsset, AudioAssetIn, AudioScript, AudioScriptIn, AudioType, EventIn, GenerationJob, MixParams, PlaybackRecord, ProfileCheckinIn, RemixJob, RemixSession, UserProfile, UserProfileIn, UserQuestionnaire, UserQuestionnaireIn
+from floppy_backend.models import AudioAsset, AudioAssetIn, AudioScript, AudioScriptIn, AudioType, EventIn, GenerationDirective, GenerationJob, MixParams, PlaybackRecord, ProfileCheckinIn, RemixJob, RemixSession, UserProfile, UserProfileIn, UserQuestionnaire, UserQuestionnaireIn
 from floppy_backend.utils import dumps, loads, stable_id, utcnow
 
 
@@ -341,6 +341,7 @@ class Repository:
         cache_key: str,
         status: str,
         provider: str,
+        directive_json: str | None = None,
     ) -> tuple[GenerationJob, bool]:
         self.ensure_user(user_id)
         with self._lock:
@@ -367,10 +368,10 @@ class Repository:
                     provider, asset_id, script_id, script_hash, script_chars, provider_model,
                     provider_task_id, provider_file_id, provider_status, provider_payload,
                     usage_characters, estimated_cost_usd, error_code, error_message,
-                    latency_ms, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, ?, ?)
+                    latency_ms, directive_json, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, ?, ?, ?)
                 """,
-                (job_id, user_id, request_text, normalized_intent, cache_key, status, provider, now, now),
+                (job_id, user_id, request_text, normalized_intent, cache_key, status, provider, directive_json, now, now),
             )
             self.conn.commit()
             created = self.conn.execute("SELECT * FROM generation_jobs WHERE id = ?", (job_id,)).fetchone()
@@ -524,6 +525,13 @@ class Repository:
     def _job_from_row(self, row: sqlite3.Row) -> GenerationJob:
         asset = self.get_asset(row["asset_id"]) if row["asset_id"] else None
         script = self.get_audio_script(row["script_id"]) if row["script_id"] else None
+        directive = None
+        directive_raw = row["directive_json"] if "directive_json" in row.keys() else None
+        if directive_raw:
+            try:
+                directive = GenerationDirective.model_validate(loads(directive_raw))
+            except Exception:  # noqa: BLE001 — tolerate legacy/garbled rows
+                directive = None
         return GenerationJob(
             id=row["id"],
             user_id=row["user_id"],
@@ -546,6 +554,7 @@ class Repository:
             error_code=row["error_code"],
             error_message=row["error_message"],
             latency_ms=row["latency_ms"],
+            directive=directive,
             created_at=_dt(row["created_at"]),
             updated_at=_dt(row["updated_at"]),
             asset=asset,

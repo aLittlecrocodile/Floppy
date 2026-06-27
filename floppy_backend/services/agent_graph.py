@@ -14,6 +14,7 @@ from floppy_backend.config import Settings
 from floppy_backend.models import (
     AgentDecideRequest,
     AgentDecideResponse,
+    AgentToolCall,
     AssetSearchFilters,
     AssetSearchRequest,
     AssetSearchResponse,
@@ -26,13 +27,13 @@ from floppy_backend.models import (
     ProfileContext,
 )
 from floppy_backend.repositories import Repository
+from floppy_backend.services.directive_planner import DirectivePlanner
 from floppy_backend.services.generation import BudgetExceededError, GenerationService
 from floppy_backend.services.normalizer import RequestNormalizer
 from floppy_backend.services.query_planner import QueryPlanner, RuleQueryPlanner, StructuredQuery
 from floppy_backend.services.recommendation import RecommendationService
 from floppy_backend.services.remix import RemixService
 from floppy_backend.storage import LocalFileStorage
-from floppy_backend.utils import sha256_json
 
 
 # Remix intent keywords — user wants to add/adjust background on current asset
@@ -79,6 +80,7 @@ class AgentGraphBuilder:
         settings: Settings,
         query_planner: QueryPlanner | None = None,
         remix_service: RemixService | None = None,
+        directive_planner: DirectivePlanner | None = None,
     ):
         self._repo = repository
         self._storage = storage
@@ -89,6 +91,7 @@ class AgentGraphBuilder:
         self._settings = settings
         self._planner = query_planner or RuleQueryPlanner()
         self._fallback_planner = RuleQueryPlanner()
+        self._directive_planner = directive_planner
         self._graph = self._build()
 
     # -- Nodes ----------------------------------------------------------------
@@ -111,7 +114,7 @@ class AgentGraphBuilder:
         profile = self._repo.get_profile(req.user_id)
         gen_req = GenerationRequest(request_text=req.request_text)
         normalized = self._normalizer.normalize(gen_req, profile)
-        cache_key = sha256_json(normalized.model_dump(mode="json"))
+        cache_key = self._gen.cache_key_for(normalized)
 
         # Detect remix intent
         is_remix = req.current_asset_id and any(kw in req.request_text for kw in REMIX_KEYWORDS)
@@ -201,8 +204,24 @@ class AgentGraphBuilder:
     def _create_generation_job(self, state: AgentState) -> dict[str, Any]:
         req = state["request"]
         self._gen.check_generation_budget(req.user_id)
-        response = self._gen.enqueue_or_match(req.user_id, GenerationRequest(request_text=req.request_text, force_generate=True))
-        return {"action": "generate_job", "asset": None, "job_id": response.job_id, "remix_job_id": None, "reasons": ["资产库未命中，已创建生成任务"]}
+        # Agent "thinks first": distill request+profile into a structured
+        # directive (content outline) so the workflow writes a personalized
+        # script instead of a template. Planner returns None on any failure →
+        # workflow falls back to templates, generation never breaks.
+        directive = None
+        if self._directive_planner is not None:
+            try:
+                directive = self._directive_planner.plan(req.request_text, state.get("profile_context"))
+            except Exception:  # noqa: BLE001 — directive is best-effort
+                directive = None
+        response = self._gen.enqueue_or_match(
+            req.user_id,
+            GenerationRequest(request_text=req.request_text, force_generate=True, directive=directive),
+        )
+        reason = "资产库未命中，已创建生成任务"
+        if directive is not None:
+            reason += "（智能体已生成内容指令）"
+        return {"action": "generate_job", "asset": None, "job_id": response.job_id, "remix_job_id": None, "reasons": [reason]}
 
     def _remix_current(self, state: AgentState) -> dict[str, Any]:
         """Remix the current asset with an ambient layer (no TTS quota consumed)."""
@@ -272,8 +291,16 @@ class AgentGraphBuilder:
         if result.get("error"):
             raise ValueError(result["error"])
 
+        action = result["action"]
+        selected_skill = {
+            "play_asset": "play_asset",
+            "generate_job": "generate_sleep_audio",
+            "remix_current": "remix_current",
+            "no_match": "no_match",
+        }.get(action, action)
+
         return AgentDecideResponse(
-            action=result["action"],
+            action=action,
             normalized_request=result["normalized_request"],
             profile_context=result["profile_context"],
             search=result["search_result"],
@@ -282,4 +309,17 @@ class AgentGraphBuilder:
             remix_job_id=result.get("remix_job_id"),
             reasons=result.get("reasons", []),
             planner_meta=PlannerMeta(**result["planner_meta"]) if result.get("planner_meta") else None,
+            selected_skill=selected_skill,
+            tool_calls=[
+                AgentToolCall(
+                    name=selected_skill,
+                    status="succeeded",
+                    output={
+                        "action": action,
+                        "asset_id": result.get("asset").id if result.get("asset") else None,
+                        "job_id": result.get("job_id"),
+                        "remix_job_id": result.get("remix_job_id"),
+                    },
+                )
+            ],
         )

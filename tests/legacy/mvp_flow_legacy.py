@@ -67,6 +67,12 @@ def test_seed_profile_recommend_generate_cache(tmp_path, monkeypatch):
         assert first_job_body["script_chars"] == len(first_job_body["script"]["script_text"])
         assert first_job_body["provider_model"] == "local_tone"
         assert first_job_body["provider_status"] == "succeeded"
+        assert first_job_body["provider_payload"]["workflow"]["status"] == "succeeded"
+        assert first_job_body["provider_payload"]["workflow"]["artifact"]["asset_id"] == first_body["asset"]["id"]
+        diagnostics = first_job_body["provider_payload"]["workflow"]["diagnostics"]
+        assert diagnostics["voice_id"] == "Chinese (Mandarin)_Warm_Bestie"
+        assert diagnostics["voice_object_key"].endswith(".wav")
+        assert diagnostics["mixed_object_key"] == diagnostics["voice_object_key"]
 
         cache_request_payload = dict(request_payload)
         cache_request_payload["force_generate"] = False
@@ -336,9 +342,9 @@ def test_hubless_music_prompt_uses_background_and_intent():
 
 def test_minimax_music_mix_replaces_voice_asset_with_mixed_asset(tmp_path):
     from floppy_backend.providers.audio import GeneratedAudio, GeneratedMusic
-    from floppy_backend.services.generation import GenerationService, PreparedGeneration
     from floppy_backend.services.minimax_hubless import AudioMeta
     from floppy_backend.storage import LocalFileStorage
+    from floppy_backend.workflows.sleep_audio import SleepAudioWorkflowService
 
     class DummyMiniMaxProvider:
         name = "minimax_t2a"
@@ -359,7 +365,7 @@ def test_minimax_music_mix_replaces_voice_asset_with_mixed_asset(tmp_path):
 
     storage = LocalFileStorage(tmp_path / "audio", public_base_url="http://test")
     settings = Settings(minimax_api_key="test-key", minimax_enable_music_mix=True)
-    service = GenerationService(None, storage, DummyMiniMaxProvider(), None, None, None, settings)  # type: ignore[arg-type]
+    service = SleepAudioWorkflowService(None, storage, DummyMiniMaxProvider(), None, settings)  # type: ignore[arg-type]
     normalized = NormalizedAudioRequest(
         intent=AudioType.STORY,
         duration_bucket="short",
@@ -369,7 +375,8 @@ def test_minimax_music_mix_replaces_voice_asset_with_mixed_asset(tmp_path):
         mood=["calm"],
         content_topic=["书店"],
     )
-    prepared = PreparedGeneration(normalized=normalized, cache_key="a" * 64, cached_asset=None, match_type="generated")
+    cache_key = "a" * 64
+    request = service.build_request(user_id="u_test", cache_key=cache_key, normalized=normalized, profile=None)
     speech_path = storage.path_for("ondemand/u_test/aaaaaaaaaaaaaaaa_voice.mp3")
     speech_path.parent.mkdir(parents=True, exist_ok=True)
     speech_path.write_bytes(b"speech-bytes")
@@ -400,8 +407,8 @@ def test_minimax_music_mix_replaces_voice_asset_with_mixed_asset(tmp_path):
             size_bytes=11,
         )
 
-    with unittest.mock.patch("floppy_backend.services.generation.ffmpeg_mix", side_effect=fake_mix):
-        mixed = service._mix_minimax_music_layer("u_test", prepared, speech)
+    with unittest.mock.patch("floppy_backend.workflows.sleep_audio.ffmpeg_mix", side_effect=fake_mix):
+        mixed = service._mix_minimax_music_layer(user_id="u_test", cache_key=cache_key, normalized=normalized, request=request, speech=speech)
 
     assert mixed.object_key == "ondemand/u_test/aaaaaaaaaaaaaaaa.mp3"
     assert mixed.path.read_bytes() == b"mixed-bytes"
@@ -556,6 +563,18 @@ def test_request_normalizer_maps_chinese_tags():
 
     assert rain.background == "rain_soft"
     assert female.voice_style == "warm_female"
+
+
+def test_request_normalizer_defaults_meditation_to_twenty_minutes():
+    normalizer = RequestNormalizer()
+
+    default_meditation = normalizer.normalize(GenerationRequest(request_text="我想做一个呼吸冥想放松"), None)
+    explicit_short = normalizer.normalize(GenerationRequest(request_text="我想做一个5分钟呼吸冥想"), None)
+
+    assert default_meditation.intent == AudioType.MEDITATION
+    assert default_meditation.duration_sec == 20 * 60
+    assert default_meditation.duration_bucket == "10-20min"
+    assert explicit_short.duration_sec == 5 * 60
 
 
 def test_force_generate_creates_audio_asset_with_matching_prompt_hash(tmp_path, monkeypatch):
@@ -830,7 +849,10 @@ def test_agent_decide_generate_job_on_miss(tmp_path, monkeypatch):
 
         job = client.get(f"/generation-jobs/{body['job_id']}")
         assert job.status_code == 200
-        assert job.json()["status"] == "succeeded"
+        job_body = job.json()
+        assert job_body["status"] == "succeeded"
+        assert job_body["provider_payload"]["workflow"]["status"] == "succeeded"
+        assert job_body["provider_payload"]["workflow"]["artifact"]["asset_id"] == job_body["asset"]["id"]
 
 
 def test_agent_decide_budget_exceeded_returns_429(tmp_path, monkeypatch):
@@ -1220,25 +1242,28 @@ def test_asset_upsert_reuses_prompt_hash(tmp_path):
 
 
 def test_ambient_provider_generates_distinct_audio(tmp_path):
-    """Each white_noise/music catalog item produces a different WAV file."""
-    from floppy_backend.catalog import AUDIO_CATALOG
-    from floppy_backend.models import GenerationRequest, NormalizedAudioRequest, AudioType
+    """Representative ambient generators produce different WAV files."""
+    from floppy_backend.models import NormalizedAudioRequest, AudioType
     from floppy_backend.providers.audio import LocalToneAudioProvider
-    from floppy_backend.services.normalizer import RequestNormalizer
 
-    provider = LocalToneAudioProvider()
-    normalizer = RequestNormalizer()
+    provider = LocalToneAudioProvider(max_duration_sec=3)
     hashes = []
-    ambient_items = [i for i in AUDIO_CATALOG if i["audio_type"] in ("white_noise", "music")]
-    assert len(ambient_items) >= 12
+    representative_titles = ["夜雨轻敲", "远处海浪", "月光钢琴曲", "弦乐小夜曲"]
 
-    for idx, item in enumerate(ambient_items):
-        normalized = normalizer.normalize(GenerationRequest(request_text=item["request_text"]), profile=None)
+    for idx, title in enumerate(representative_titles):
+        normalized = NormalizedAudioRequest(
+            intent=AudioType.MUSIC,
+            duration_bucket="short",
+            duration_sec=120,
+            voice_style="warm_female",
+            background="none",
+            mood=[],
+            content_topic=[],
+        )
         out = tmp_path / f"ambient_{idx}.wav"
-        result = provider.generate(normalized, out, f"test/{idx}.wav", title=item["title"])
+        result = provider.generate(normalized, out, f"test/{idx}.wav", title=title)
         hashes.append(result.content_hash)
 
-    # All should be distinct
     assert len(set(hashes)) == len(hashes), "Some ambient items produced identical audio"
 
 

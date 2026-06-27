@@ -24,10 +24,52 @@ class RemixError(RuntimeError):
     pass
 
 
+# sound_type -> tags that identify a matching real ambient asset in the catalog.
+# This is the ONLY static mapping; "which assets carry the tag" is queried live
+# from the asset DB, so any newly imported/generated asset that carries the tag
+# is automatically eligible (no table to maintain).
+_SOUND_TYPE_TAGS: dict[str, list[str]] = {
+    "rain": ["rain"],
+    "ocean": ["ocean"],
+    "stream": ["nature"],
+    "fire": ["ambient"],
+    "forest": ["nature"],
+    "fan": ["ambient"],
+    "piano": ["ambient", "minimal_voice"],
+    "cello": ["ambient", "slow_pace"],
+    "strings": ["ambient", "slow_pace"],
+    "flute": ["ambient", "minimal_voice"],
+    "guitar": ["ambient", "minimal_voice"],
+    "guzheng": ["nature", "ambient"],
+}
+_MUSIC_SOUND_TYPES = {"piano", "cello", "strings", "flute", "guitar", "guzheng"}
+
+
 class RemixService:
     def __init__(self, repository: Repository, storage: LocalFileStorage):
         self.repository = repository
         self.storage = storage
+
+    def resolve_ambient_asset(self, sound_type: str) -> str | None:
+        """Find a real ambient asset matching sound_type, by tag, from the DB.
+
+        Returns the asset id of the best (highest quality_score) real asset
+        whose type+tags match, or None to fall back to procedural synthesis.
+        Tag-driven so new tagged assets are picked up automatically.
+        """
+        target_tags = _SOUND_TYPE_TAGS.get(sound_type, [sound_type])
+        want_type = AudioType.MUSIC if sound_type in _MUSIC_SOUND_TYPES else AudioType.WHITE_NOISE
+        # list_assets is ordered by quality_score DESC.
+        for asset in self.repository.list_assets():
+            if asset.type != want_type:
+                continue
+            if not set(target_tags).intersection(asset.tags):
+                continue
+            # Prefer real files (imported or generated), skip local placeholders.
+            if asset.object_key.startswith("real/") or asset.created_by != "seed_placeholder":
+                if self.storage.existing_path_for(asset.object_key).exists():
+                    return asset.id
+        return None
 
     def run_remix(self, job_id: str) -> None:
         job = self.repository.get_remix_job(job_id)
@@ -53,10 +95,13 @@ class RemixService:
                 self._finalize(job_id, voice_asset, output_path, object_key, [])
                 return
 
-            # Resolve ambient
+            # Resolve ambient: explicit asset > real asset by sound_type > synth
             ambient_path: Path | None = None
-            if job.ambient_asset_id:
-                ambient_asset = self.repository.get_asset(job.ambient_asset_id)
+            ambient_asset_id = job.ambient_asset_id
+            if not ambient_asset_id and job.sound_type:
+                ambient_asset_id = self.resolve_ambient_asset(job.sound_type)
+            if ambient_asset_id:
+                ambient_asset = self.repository.get_asset(ambient_asset_id)
                 if ambient_asset is None:
                     raise RemixError("ambient asset not found")
                 ambient_path = self.storage.existing_path_for(ambient_asset.object_key)
@@ -76,14 +121,17 @@ class RemixService:
             if session and session.mix_params:
                 bg_vol = session.mix_params.background_volume
 
-            # Choose mixing strategy based on foreground format
-            is_mp3 = voice_path.suffix.lower() == ".mp3"
-            ext = ".mp3" if is_mp3 else ".wav"
+            # Choose mixing strategy: ffmpeg if EITHER side is mp3 (wav-only
+            # mixer can't decode mp3 ambient), else native wav mixing.
+            voice_is_mp3 = voice_path.suffix.lower() == ".mp3"
+            ambient_is_mp3 = ambient_path.suffix.lower() == ".mp3"
+            use_ffmpeg = voice_is_mp3 or ambient_is_mp3
+            ext = ".mp3" if voice_is_mp3 else ".wav"
             object_key = f"remix/{job_id}{ext}"
             output_path = self.storage.path_for(object_key)
             output_path.parent.mkdir(parents=True, exist_ok=True)
 
-            if is_mp3:
+            if use_ffmpeg:
                 _mix_ffmpeg(voice_path, ambient_path, output_path, job.voice_volume, bg_vol)
             else:
                 _mix_wav(voice_path, ambient_path, output_path, job.voice_volume, bg_vol)

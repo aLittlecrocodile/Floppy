@@ -5,6 +5,8 @@ from floppy_backend.config import Settings, get_settings
 
 class TestSettings(Settings):
     """Settings that ignores .env file — avoids calling real APIs in tests."""
+    local_provider_max_duration_sec: int | None = 1
+
     model_config = Settings.model_config.copy()
     model_config["env_file"] = None
 

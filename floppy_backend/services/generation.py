@@ -1,19 +1,17 @@
 from __future__ import annotations
 
-import time
 from dataclasses import dataclass
 
 from floppy_backend.config import Settings
-from floppy_backend.models import AssetSearchRequest, AudioAsset, AudioAssetIn, AudioScript, EventIn, GenerationJobCreateResponse, GenerationRequest, GenerationResponse, NormalizedAudioRequest
+from floppy_backend.models import AssetSearchRequest, AudioAsset, AudioScript, EventIn, GenerationJobCreateResponse, GenerationRequest, GenerationResponse, NormalizedAudioRequest
 from floppy_backend.providers.audio import AudioGenerationProvider, GeneratedAudio
 from floppy_backend.repositories import Repository
-from floppy_backend.services.minimax_hubless import build_sleep_music_prompt, ffmpeg_mix, probe_audio
-from floppy_backend.services import script_guard
 from floppy_backend.services.normalizer import RequestNormalizer
 from floppy_backend.services.recommendation import RecommendationService
 from floppy_backend.services.script import SleepScriptService
 from floppy_backend.storage import LocalFileStorage
-from floppy_backend.utils import sha256_json, sha256_text, text_embedding
+from floppy_backend.workflows.cache import build_sleep_audio_cache_key
+from floppy_backend.workflows.sleep_audio import SleepAudioWorkflowService
 
 
 @dataclass(frozen=True)
@@ -47,9 +45,16 @@ class GenerationService:
         self.recommendation_service = recommendation_service
         self.script_service = script_service
         self._settings = settings
+        self.workflow_service = SleepAudioWorkflowService(
+            repository=repository,
+            storage=storage,
+            provider=provider,
+            script_service=script_service,
+            settings=settings,
+        )
 
     def check_generation_budget(self, user_id: str) -> None:
-        if self._settings is None:
+        if self._settings is None or not self._settings.enforce_generation_budget:
             return
         used_chars, used_count = self.repository.generation_usage_since(user_id, hours=24)
         if used_chars >= self._settings.daily_char_budget:
@@ -140,6 +145,7 @@ class GenerationService:
             cache_key=prepared.cache_key,
             status="queued",
             provider=self.provider.name,
+            directive_json=request.directive.model_dump_json() if request.directive else None,
         )
         return GenerationJobCreateResponse(
             job_id=job.id,
@@ -156,6 +162,12 @@ class GenerationService:
             return
         if job.status == "succeeded":
             return
+        # Recover the agent's directive from the persisted job when the caller
+        # didn't carry it (async path reconstructs a bare GenerationRequest).
+        # Without this the worker would regenerate from a template even though
+        # the agent already wrote a content outline at enqueue time.
+        if request.directive is None and job.directive is not None:
+            request = request.model_copy(update={"directive": job.directive})
         self.repository.update_generation_job(job_id, status="generating")
         prepared = self.prepare(user_id, request, allow_cache=False)
         try:
@@ -165,10 +177,16 @@ class GenerationService:
             return
         self._mark_succeeded(job_id, asset, latency_ms, prepared.script, generated)
 
+    def cache_key_for(self, normalized: NormalizedAudioRequest, directive=None) -> str:
+        return build_sleep_audio_cache_key(
+            normalized, provider_name=self.provider.name, settings=self._settings, directive=directive
+        )
+
     def prepare(self, user_id: str, request: GenerationRequest, allow_cache: bool = True) -> PreparedGeneration:
         profile = self.repository.get_profile(user_id)
         normalized = self.normalizer.normalize(request, profile)
-        cache_key = sha256_json(normalized.model_dump(mode="json"))
+        directive = request.directive
+        cache_key = self.cache_key_for(normalized, directive)
 
         if allow_cache and not request.force_generate:
             search = self.recommendation_service.search(
@@ -193,117 +211,21 @@ class GenerationService:
                 )
                 return PreparedGeneration(normalized=normalized, cache_key=cache_key, cached_asset=asset, match_type=result.match_type)
 
-        sleep_script = self.script_service.generate(normalized, profile)
-        script = self.repository.upsert_audio_script(sleep_script.to_input(user_id))
+        script = self.workflow_service.prepare_script(
+            user_id=user_id, normalized=normalized, profile=profile, directive=directive
+        )
         return PreparedGeneration(normalized=normalized, cache_key=cache_key, cached_asset=None, match_type="generated", script=script)
 
     def execute_generation(self, user_id: str, prepared: PreparedGeneration) -> tuple[AudioAsset, int, GeneratedAudio]:
-        if prepared.script and prepared.script.safety_status != "approved":
-            notes = ", ".join(prepared.script.safety_notes)
-            raise script_guard.ScriptGuardError(f"script guard rejected script: {prepared.script.safety_status}; {notes}")
         profile = self.repository.get_profile(user_id)
-        started = time.perf_counter()
-        output_ext = "mp3" if self.provider.name == "minimax_t2a" else "wav"
-        music_mix_enabled = (
-            self.provider.name == "minimax_t2a"
-            and self._settings is not None
-            and self._settings.minimax_enable_music_mix
-            and hasattr(self.provider, "generate_instrumental_music")
+        result = self.workflow_service.run(
+            user_id=user_id,
+            cache_key=prepared.cache_key,
+            normalized=prepared.normalized,
+            profile=profile,
+            script=prepared.script,
         )
-        suffix = "_voice" if music_mix_enabled else ""
-        object_key = f"ondemand/{user_id}/{prepared.cache_key[:16]}{suffix}.{output_ext}"
-        path = self.storage.path_for(object_key)
-        generated = self.provider.generate(
-            prepared.normalized,
-            path,
-            object_key,
-            script_text=prepared.script.script_text if prepared.script else None,
-            title=prepared.script.title if prepared.script else None,
-        )
-        if music_mix_enabled:
-            generated = self._mix_minimax_music_layer(user_id, prepared, generated)
-        latency_ms = int((time.perf_counter() - started) * 1000)
-        asset = self.repository.upsert_asset(
-            AudioAssetIn(
-                type=prepared.normalized.intent,
-                title=generated.title,
-                object_key=generated.object_key,
-                duration_sec=generated.duration_sec,
-                language=prepared.normalized.language,
-                voice_id=prepared.normalized.voice_style,
-                prompt_hash=prepared.cache_key,
-                content_hash=generated.content_hash,
-                mood_tags=prepared.normalized.mood,
-                user_segment_tags=[profile.segment if profile else "balanced_sleep"],
-                quality_score=0.72,
-                embedding=text_embedding(
-                    " ".join(
-                        [
-                            prepared.normalized.intent.value,
-                            prepared.normalized.background,
-                            prepared.normalized.voice_style,
-                            *prepared.normalized.mood,
-                            *prepared.normalized.content_topic,
-                        ]
-                    )
-                ),
-                created_by="ondemand",
-            )
-        )
-        asset.playback_url = self.storage.public_url(asset.object_key)
-        return asset, latency_ms, generated
-
-    def _mix_minimax_music_layer(self, user_id: str, prepared: PreparedGeneration, speech: GeneratedAudio) -> GeneratedAudio:
-        if self._settings is None:
-            return speech
-        base = prepared.cache_key[:16]
-        music_key = f"ondemand/{user_id}/{base}_music.mp3"
-        mixed_key = f"ondemand/{user_id}/{base}.mp3"
-        music_path = self.storage.path_for(music_key)
-        mixed_path = self.storage.path_for(mixed_key)
-        music_prompt = build_sleep_music_prompt(prepared.normalized)
-        music = self.provider.generate_instrumental_music(  # type: ignore[attr-defined]
-            music_prompt,
-            music_path,
-            music_key,
-            title=f"{speech.title} background",
-        )
-        mixed_meta = ffmpeg_mix(
-            speech.path,
-            music.path,
-            mixed_path,
-            foreground_volume=self._settings.minimax_voice_mix_volume,
-            background_volume=self._settings.minimax_music_mix_volume,
-        )
-        if mixed_meta.duration_sec <= 0:
-            mixed_meta = probe_audio(mixed_path)
-        payload = {
-            "speech": speech.provider_payload,
-            "music": music.provider_payload,
-            "mix": {
-                "music_prompt": music_prompt,
-                "voice_object_key": speech.object_key,
-                "music_object_key": music.object_key,
-                "mixed_object_key": mixed_key,
-                "duration_sec": mixed_meta.duration_sec,
-                "voice_volume": self._settings.minimax_voice_mix_volume,
-                "music_volume": self._settings.minimax_music_mix_volume,
-            },
-        }
-        return GeneratedAudio(
-            object_key=mixed_key,
-            path=mixed_path,
-            duration_sec=max(1, int(mixed_meta.duration_sec)),
-            title=speech.title,
-            content_hash=sha256_text(mixed_path.read_bytes().hex()),
-            provider_model=f"{speech.provider_model}+{music.provider_model}",
-            provider_task_id=speech.provider_task_id,
-            provider_file_id=speech.provider_file_id,
-            provider_status="succeeded",
-            provider_payload=payload,
-            usage_characters=speech.usage_characters,
-            estimated_cost_usd=speech.estimated_cost_usd,
-        )
+        return result.asset, result.latency_ms, result.generated
 
     def _mark_succeeded(self, job_id: str, asset: AudioAsset, latency_ms: int, script: AudioScript | None, generated: GeneratedAudio) -> None:
         self.repository.update_generation_job(

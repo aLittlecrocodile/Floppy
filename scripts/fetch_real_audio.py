@@ -65,6 +65,23 @@ WHITE_NOISE = [
                "Rainforest 5h Bubbling River Falls(gentle),Birds,Insects,Animals-Daytime,South America.mp3", 1800),
     WhiteNoise(6, "轻柔风扇", "温柔摆头风扇·持续低响", "relaxingsounds",
                "FAN 2 10h Gentle,Oscillating Fan.mp3", 3600),
+    # --- v3.1 扩充：更多助眠向自然实录 ---
+    WhiteNoise(12, "雨夜微雷", "中等小雨·低沉远雷·阴天", "relaxingsounds",
+               "Rain 4 (Med.-Light) 10h LowGentleThunder-Overcast Day.mp3", 7200),
+    WhiteNoise(13, "雨打树叶", "最轻柔细雨·滴落树梢·无雷", "relaxingsounds",
+               "Rain 7 (Lightest) 8h DripsOnTrees-no thunder.mp3", 5400),
+    WhiteNoise(14, "夏夜虫鸣", "蟋蟀·河流·夜枭·林间夜声", "relaxingsounds",
+               "Crickets 8h RiverBubbling,Owls,NightSounds-Woods.mp3", 7200),
+    WhiteNoise(15, "蛙鸣夜沼", "夜晚沼泽·蛙声·雨滴", "relaxingsounds",
+               "FROGS 6h NightSwampSounds,RainDrips&Splashes.mp3", 5400),
+    WhiteNoise(16, "篝火夜林", "噼啪篝火·蟋蟀·雨或河声·夜", "relaxingsounds",
+               "FIRE 1 10h CracklingCampfire,Crickets,RainOrRiver-Night.mp3", 5400),
+    WhiteNoise(17, "雪夜微风", "轻雪·微风·黄昏入夜·森林", "relaxingsounds",
+               "Snowfall & Wind(Lite) 10h Dusk into Night-Forest.mp3", 5400),
+    WhiteNoise(18, "棕噪低吟", "低频棕噪·温柔持续（似引擎/急流）", "relaxingsounds",
+               "Wind 1 8h (or Rapids) Gentle,LowPitch,BrownNoise.mp3", 5400),
+    WhiteNoise(19, "海岸雷雨", "极低沉雷声·雨·海浪·海滩", "relaxingsounds",
+               "Thunder 1 8h VeryLowRumbling,Rain,Waves-Beach.mp3", 7200),
 ]
 
 CHOPIN_LIC = "http://creativecommons.org/publicdomain/zero/1.0/ (CC0)"
@@ -104,6 +121,49 @@ MUSIC = [
                      "Suk_Meditation/JosefSuk-Meditation.flac",
                      "Mozart_MagicFluteOverture/WolfgangAmadeusMozart-MagicFluteOverture.flac",
                      "Schubert_SonataInAMajorD.664/FranzSchubert-SonataInAMajorD.664-02-Andante.flac",
+                 ], license=MUSOPEN_LIC),
+    # --- v3.1 扩充：更多助眠向轻音乐 ---
+    MusicProgram(20, "肖邦夜曲精选", "钢琴独奏·肖邦夜曲串联（最适合入睡）", "musopen-chopin",
+                 files=[
+                     "Nocturne Op. 9 no. 2 in E flat major.mp3",
+                     "Nocturne Op. 27 no. 1 in C sharp minor.mp3",
+                     "Nocturne Op. 48 no. 1 in C minor.mp3",
+                     "Nocturne Op. 55 no. 1 in F minor.mp3",
+                     "Nocturne Op. 32 no. 1 in B major.mp3",
+                 ], license=CHOPIN_LIC),
+    MusicProgram(21, "巴赫《哥德堡变奏曲》开篇", "钢琴独奏·咏叹调+前段变奏·宁静", "MusopenCollectionAsFlac",
+                 files=[
+                     "Bach_GoldbergVariations/JohannSebastianBach-01-GoldbergVariationsBwv.988-Aria.flac",
+                     "Bach_GoldbergVariations/JohannSebastianBach-02-GoldbergVariationsBwv.988-Variation1.flac",
+                     "Bach_GoldbergVariations/JohannSebastianBach-04-GoldbergVariationsBwv.988-Variation3.CanonOnTheUnison.flac",
+                     "Bach_GoldbergVariations/JohannSebastianBach-14-GoldbergVariationsBwv.988-Variation13.flac",
+                     "Bach_GoldbergVariations/JohannSebastianBach-16-GoldbergVariationsBwv.988-Variation15.CanonOnTheFifth.flac",
+                     "Bach_GoldbergVariations/JohannSebastianBach-26-GoldbergVariationsBwv.988-Variation25.flac",
+                     "Bach_GoldbergVariations/JohannSebastianBach-32-GoldbergVariationsBwv.988-AriaDaCapo.flac",
+                 ], license=MUSOPEN_LIC),
+    MusicProgram(22, "格里格《培尔·金特》组曲", "管弦·晨景/奥丝之死/阿尼特拉之舞", "MusopenCollectionAsFlac",
+                 files=[
+                     "Greig_PeerGynt/EdvardGrieg-PeerGyntSuiteNo.1Op.46-01-Morning.flac",
+                     "Greig_PeerGynt/EdvardGrieg-PeerGyntSuiteNo.1Op.46-02-AasesDeath.flac",
+                     "Greig_PeerGynt/EdvardGrieg-PeerGyntSuiteNo.1Op.46-03-AnitrasDream.flac",
+                     "Greig_PeerGynt/EdvardGrieg-PeerGyntSuiteNo.1Op.46-04-InTheHallOfTheMountainKing.flac",
+                 ], license=MUSOPEN_LIC),
+    MusicProgram(23, "舒伯特奏鸣曲 D.959 慢板", "钢琴独奏·行板+回旋曲·绵长抒情", "MusopenCollectionAsFlac",
+                 files=[
+                     "Schubert_SonataInAMinorD.959/FranzSchubert-SonataInAMinorD.959-02-Andantino.flac",
+                     "Schubert_SonataInAMinorD.959/FranzSchubert-SonataInAMinorD.959-04-Rondo.Allegretto.flac",
+                 ], license=MUSOPEN_LIC),
+    MusicProgram(24, "贝多芬第六弦乐四重奏", "弦乐合奏·柔板乐章为主", "MusopenCollectionAsFlac",
+                 files=[
+                     "Beethoven_StringQuartetNo.6inBFlatMajorOp.18/LudwigVanBeethoven-StringQuartetNo.6InBFlatMajorOp.18No.6-02-AdagioMaNonTroppo.flac",
+                     "Beethoven_StringQuartetNo.6inBFlatMajorOp.18/LudwigVanBeethoven-StringQuartetNo.6InBFlatMajorOp.18No.6-01-AllegroConBrio.flac",
+                     "Beethoven_StringQuartetNo.6inBFlatMajorOp.18/LudwigVanBeethoven-StringQuartetNo.6InBFlatMajorOp.18No.6-03-ScherzoAllegro.flac",
+                 ], license=MUSOPEN_LIC),
+    MusicProgram(25, "海顿《云雀》弦乐四重奏", "弦乐合奏·柔美如歌", "MusopenCollectionAsFlac",
+                 files=[
+                     "Haydn_StringQuartetInDMajorOp.64/JosephHaydn-StringQuartetInDOp.645H363Lark-02-AdagioCantabile.flac",
+                     "Haydn_StringQuartetInDMajorOp.64/JosephHaydn-StringQuartetInDOp.645H363Lark-01-AllegroModerato.flac",
+                     "Haydn_StringQuartetInDMajorOp.64/JosephHaydn-StringQuartetInDOp.645H363Lark-03-MenuettoAllegretto.flac",
                  ], license=MUSOPEN_LIC),
 ]
 
@@ -181,12 +241,13 @@ def main() -> None:
     # ---- White noise ----
     for wn in WHITE_NOISE:
         print(f"[WN {wn.idx}] {wn.title}")
-        ext = Path(wn.filename).suffix
-        raw = raw_dir / f"wn{wn.idx}{ext}"
-        if not raw.exists() or raw.stat().st_size < 1_000_000:
-            curl_to(dl_url(wn.item, wn.filename), raw)
         out = wn_dir / f"{wn.idx:02d}_{wn.title}_20min.mp3"
-        slice_white_noise(wn, raw, out)
+        if not (out.exists() and probe_dur(out) > 60):
+            ext = Path(wn.filename).suffix
+            raw = raw_dir / f"wn{wn.idx}{ext}"
+            if not raw.exists() or raw.stat().st_size < 1_000_000:
+                curl_to(dl_url(wn.item, wn.filename), raw)
+            slice_white_noise(wn, raw, out)
         dur = probe_dur(out)
         rows.append({
             "idx": wn.idx, "category": "white_noise", "title": wn.title,
@@ -200,15 +261,16 @@ def main() -> None:
     # ---- Music ----
     for mp in MUSIC:
         print(f"[MUSIC {mp.idx}] {mp.title}")
-        parts = []
-        for i, fn in enumerate(mp.files):
-            ext = Path(fn).suffix
-            raw = raw_dir / f"mu{mp.idx}_{i}{ext}"
-            if not raw.exists() or raw.stat().st_size < 100_000:
-                curl_to(dl_url(mp.item, fn), raw)
-            parts.append(raw)
         out = mu_dir / f"{mp.idx:02d}_{mp.title}_20min.mp3"
-        build_music(mp, parts, out, tmp_dir)
+        if not (out.exists() and probe_dur(out) > 60):
+            parts = []
+            for i, fn in enumerate(mp.files):
+                ext = Path(fn).suffix
+                raw = raw_dir / f"mu{mp.idx}_{i}{ext}"
+                if not raw.exists() or raw.stat().st_size < 100_000:
+                    curl_to(dl_url(mp.item, fn), raw)
+                parts.append(raw)
+            build_music(mp, parts, out, tmp_dir)
         dur = probe_dur(out)
         rows.append({
             "idx": mp.idx, "category": "music", "title": mp.title,

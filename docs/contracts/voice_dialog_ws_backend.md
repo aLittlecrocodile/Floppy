@@ -34,8 +34,10 @@ export FLOPPY_QUERY_PLANNER_API_KEY="<llm_key>"        # 或 FLOPPY_DIALOG_LLM_A
 export FLOPPY_QUERY_PLANNER_BASE_URL="https://..."     # OpenAI 兼容
 export FLOPPY_QUERY_PLANNER_MODEL="DeepSeek-V4-Flash"
 # 火山流式 ASR
-export FLOPPY_VOLC_ASR_APP_KEY="<app_key>"
-export FLOPPY_VOLC_ASR_ACCESS_KEY="<access_key>"
+export FLOPPY_VOLC_ASR_API_KEY="<api_key>"
+# 或旧版 app/access 双 Key:
+# export FLOPPY_VOLC_ASR_APP_KEY="<app_key>"
+# export FLOPPY_VOLC_ASR_ACCESS_KEY="<access_key>"
 export FLOPPY_VOLC_ASR_RESOURCE_ID="volc.bigasr.sauc.duration"
 # MiniMax 流式 TTS
 export FLOPPY_MINIMAX_API_KEY="<minimax_key>"
