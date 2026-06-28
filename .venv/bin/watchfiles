@@ -1,0 +1,8 @@
+#!/bin/sh
+'''exec' /root/codes/baidu_personal-code_wangaoyun-gdp-myapp/baidu/personal-code/wangaoyun-gdp-myapp/Floppy_extracted/Floppy/.venv/bin/python3 "$0" "$@"
+' '''
+import sys
+from watchfiles.cli import cli
+if __name__ == '__main__':
+    sys.argv[0] = sys.argv[0].removesuffix('.exe')
+    sys.exit(cli())

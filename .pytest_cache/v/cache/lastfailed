@@ -1,0 +1,11 @@
+{
+  "tests/test_mvp_flow.py::test_minimax_invalid_key_hint_for_international_host": true,
+  "tests/test_mvp_flow.py::test_build_audio_provider_unsupported_raises": true,
+  "tests/test_mvp_flow.py::test_minimax_http_401_hint_via_post_json": true,
+  "tests/test_mvp_flow.py::test_minimax_async_job_failed_raises": true,
+  "tests/test_mvp_flow.py::test_minimax_estimate_cost": true,
+  "tests/test_mvp_flow.py::test_minimax_list_voices_calls_get_voice": true,
+  "tests/test_mvp_flow.py::test_minimax_instrumental_music_generation_writes_audio": true,
+  "tests/test_mvp_flow.py::test_hubless_get_voice_id_uses_local_profile": true,
+  "tests/test_mvp_flow.py::test_minimax_music_mix_replaces_voice_asset_with_mixed_asset": true
+}

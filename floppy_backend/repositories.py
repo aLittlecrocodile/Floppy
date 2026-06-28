@@ -799,6 +799,27 @@ class Repository:
                 out[r["asset_id"]] = r["progress"] or 0.0
         return out
 
+    # --- Voice selection ---
+
+    def set_voice_selection(self, user_id: str, voice_id: str) -> None:
+        self.ensure_user(user_id)
+        now = utcnow().isoformat()
+        with self._lock:
+            self.conn.execute(
+                """INSERT INTO voice_selections (user_id, voice_id, updated_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(user_id) DO UPDATE SET voice_id=excluded.voice_id, updated_at=excluded.updated_at""",
+                (user_id, voice_id, now),
+            )
+            self.conn.commit()
+
+    def get_voice_selection(self, user_id: str) -> str | None:
+        with self._lock:
+            row = self.conn.execute(
+                "SELECT voice_id FROM voice_selections WHERE user_id = ?", (user_id,)
+            ).fetchone()
+        return row["voice_id"] if row else None
+
     # --- Uploads ---
 
     def create_upload(self, user_id: str, *, file_name: str, file_type: str, mime_type: str | None,

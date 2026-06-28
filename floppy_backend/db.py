@@ -191,6 +191,12 @@ CREATE TABLE IF NOT EXISTS uploads (
 
 CREATE INDEX IF NOT EXISTS idx_uploads_user
 ON uploads(user_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS voice_selections (
+    user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+    voice_id TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
 """
 
 

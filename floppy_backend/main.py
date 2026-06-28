@@ -54,6 +54,9 @@ from floppy_backend.models import (
     HistoryProgressPatchIn,
     VoiceIntentIn,
     VoiceIntentResponse,
+    VoiceOption,
+    VoiceListResponse,
+    VoiceSelectionIn,
 )
 from floppy_backend.providers.audio import build_audio_provider
 from floppy_backend.repositories import Repository
@@ -779,6 +782,32 @@ def voice_intent(payload: VoiceIntentIn):
         best_score=response.search.best_score,
         reasons=response.reasons,
     )
+
+
+# --- Voice picker (AI companion voice selection) ---
+
+
+@app.get("/api/ai-companion/voices", response_model=VoiceListResponse)
+def list_voices():
+    """List selectable voices with real, playable TTS preview clips.
+
+    Previews are synthesized once per voice and cached; the URL points at the
+    server's /audio static route (FLOPPY_PUBLIC_BASE_URL host)."""
+    from floppy_backend.services.voice_picker import list_voice_options
+
+    voices = list_voice_options(state.storage, get_settings())
+    return VoiceListResponse(voices=voices)
+
+
+@app.post("/api/ai-companion/voice")
+def save_voice_selection(payload: VoiceSelectionIn):
+    """Persist the user's chosen voice (business voice id)."""
+    from floppy_backend.voice_profiles import VOICE_PROFILES
+
+    if payload.voiceId not in VOICE_PROFILES:
+        raise HTTPException(status_code=400, detail=f"unknown voiceId: {payload.voiceId}")
+    state.repository.set_voice_selection(payload.user_id, payload.voiceId)
+    return {"status": "ok", "voiceId": payload.voiceId}
 
 
 @app.post("/admin/seed")

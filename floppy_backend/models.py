@@ -544,3 +544,28 @@ class VoiceIntentResponse(BaseModel):
     reasons: list[str] = Field(default_factory=list)
 
 
+# --- Voice selection (AI companion voice picker) ---
+
+
+class VoiceOption(BaseModel):
+    id: str                       # business voice id (== voice_style), saved on selection
+    name: str                     # display name, e.g. 温暖治愈音
+    description: str = ""
+    gender: str = ""              # female | male
+    style: str = ""               # warm | gentle | storyteller | podcast | whisper
+    provider: str = "minimax"
+    providerVoiceId: str = ""     # real TTS voice id (MiniMax)
+    previewAudioUrl: str | None = None  # playable real TTS sample
+    sampleText: str = ""
+
+
+class VoiceListResponse(BaseModel):
+    voices: list[VoiceOption]
+
+
+class VoiceSelectionIn(BaseModel):
+    voiceId: str
+    user_id: str = "demo_user"
+
+
+

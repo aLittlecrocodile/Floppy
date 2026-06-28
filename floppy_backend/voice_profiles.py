@@ -12,43 +12,79 @@ VOICE_PROFILES: dict[str, dict] = {
         "voice_id": "Chinese (Mandarin)_Warm_Bestie",
         "speed": 0.85,
         "emotion": "calm",
+        "name": "温暖治愈音",
+        "description": "温柔、放松，适合陪伴聊天与睡前故事",
+        "gender": "female",
+        "style": "warm",
     },
     "gentle_female": {
         "voice_id": "Chinese (Mandarin)_Soft_Girl",
         "speed": 0.80,
         "emotion": "calm",
+        "name": "轻柔女声",
+        "description": "柔软安静，适合冥想与呼吸引导",
+        "gender": "female",
+        "style": "gentle",
     },
     "warm_male": {
         "voice_id": "Chinese (Mandarin)_Gentleman",
         "speed": 0.85,
         "emotion": "calm",
+        "name": "温和绅士音",
+        "description": "沉稳温和的男声，适合陪伴与安抚",
+        "gender": "male",
+        "style": "warm",
     },
     "storyteller_female": {
         "voice_id": "Chinese (Mandarin)_Wise_Women",
         "speed": 0.82,
         "emotion": "calm",
+        "name": "知性故事音",
+        "description": "知性从容的女声，适合睡前故事",
+        "gender": "female",
+        "style": "storyteller",
     },
     "storyteller_male": {
         "voice_id": "Chinese (Mandarin)_Radio_Host",
         "speed": 0.80,
         "emotion": "calm",
+        "name": "电台主播音",
+        "description": "磁性电台男声，适合故事与播客",
+        "gender": "male",
+        "style": "storyteller",
     },
     "podcast_male": {
         "voice_id": "Chinese (Mandarin)_Male_Announcer",
         "speed": 0.85,
         "emotion": None,
+        "name": "播报男声",
+        "description": "清晰平稳的男声，适合资讯播客",
+        "gender": "male",
+        "style": "podcast",
     },
     "podcast_female": {
         "voice_id": "Chinese (Mandarin)_News_Anchor",
         "speed": 0.85,
         "emotion": None,
+        "name": "新闻女主播",
+        "description": "标准端庄的女声，适合资讯播客",
+        "gender": "female",
+        "style": "podcast",
     },
     "whisper_female": {
         "voice_id": "Chinese (Mandarin)_Warm_Girl",
         "speed": 0.75,
         "emotion": "calm",
+        "name": "耳语暖女声",
+        "description": "轻声耳语，适合 ASMR 与深度放松",
+        "gender": "female",
+        "style": "whisper",
     },
 }
+
+# A short Chinese sentence synthesized per voice for the preview audio.
+VOICE_PREVIEW_SAMPLE_TEXT = "你好呀，今天辛苦了，让我陪你慢慢放松下来。"
+
 
 AVAILABLE_MANDARIN_VOICE_IDS = {item["voice_id"] for item in VOICE_PROFILES.values()}
 
