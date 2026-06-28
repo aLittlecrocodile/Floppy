@@ -436,7 +436,6 @@ class AssetRemixable(BaseModel):
     reason: str | None = None
     format: str | None = None  # wav/mp3
 
-
 class RemixJob(BaseModel):
     id: str
     user_id: str
@@ -452,3 +451,96 @@ class RemixJob(BaseModel):
     created_at: datetime
     updated_at: datetime
     output_asset: AudioAsset | None = None
+
+
+# --- Android Audio page DTOs (camelCase, matches frontend contract) ---
+
+
+class Artwork(BaseModel):
+    imageUrl: str | None = None
+    seedColor: int = 0
+    prompt: str = ""
+    status: str = "Ready"  # Pending | Generating | Ready | Failed
+
+
+class AudioItem(BaseModel):
+    """camelCase audio item consumed directly by the Android client."""
+    id: str
+    title: str
+    subtitle: str = ""
+    durationSeconds: int = 0
+    streamUrl: str = ""
+    coverUrl: str | None = None
+    artwork: Artwork | None = None
+    source: str = "Library"  # Library | Upload | Generated
+    category: str = ""
+    playbackProgress: float = 0.0
+    isGenerated: bool = False
+
+
+class UploadItem(BaseModel):
+    id: str
+    fileName: str
+    fileType: str
+    sizeLabel: str = ""
+    progress: float = 0.0
+    status: str = "Idle"  # Idle | Uploading | Failed | Completed
+    message: str | None = None
+    generatedAudio: AudioItem | None = None
+
+
+class AudioLibrary(BaseModel):
+    recommended: list[AudioItem] = Field(default_factory=list)
+    uploads: list[UploadItem] = Field(default_factory=list)
+    history: list[AudioItem] = Field(default_factory=list)
+
+
+class HistoryReportIn(BaseModel):
+    audioId: str
+    source: str = "Library"  # Library | Upload | Generated
+    positionSeconds: int = 0
+    durationSeconds: int = 0
+    playbackProgress: float = Field(default=0.0, ge=0.0, le=1.0)
+    event: str = "play"  # play | progress | complete
+
+
+class HistoryProgressPatchIn(BaseModel):
+    playbackProgress: float = Field(ge=0.0, le=1.0)
+    positionSeconds: int | None = None
+
+
+# --- Voice intent (latest-wins request correlation for home voice input) ---
+
+
+class VoiceIntentIn(BaseModel):
+    """A single completed voice utterance from the home screen.
+
+    The frontend only sends a full sentence (never per-second partials) and
+    enforces latest-wins client-side: when the user speaks again it marks the
+    previous in-flight request stale. The backend's job is to echo the
+    correlation ids back verbatim so a late-returning stale response can be
+    discarded by the client."""
+    text: str = Field(min_length=1, max_length=1000)
+    conversationId: str
+    clientRequestId: str
+    turnIndex: int = Field(ge=0)
+    source: str = "voice"
+    supersedesRequestId: str | None = None
+    user_id: str = "demo_user"
+
+
+class VoiceIntentResponse(BaseModel):
+    # Correlation ids echoed back verbatim — the client matches these against
+    # its current active request and drops anything that doesn't match.
+    conversationId: str
+    clientRequestId: str
+    turnIndex: int
+    reply: str
+    audio_url: str | None = None
+    asset: AudioItem | None = None
+    action: str  # play_asset | generate_job | no_match | superseded
+    hit: bool = False
+    best_score: float | None = None
+    reasons: list[str] = Field(default_factory=list)
+
+

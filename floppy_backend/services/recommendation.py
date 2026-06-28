@@ -62,12 +62,14 @@ class RecommendationService:
         profile = self.repository.get_profile(user_id)
         assets = self.repository.list_assets()
         query_embedding = text_embedding(query or self._profile_text(profile))
+        # Behavioral memory: re-weight by what the user actually did before.
+        behavior = self.repository.behavior_signals(user_id)
         recommendations: list[Recommendation] = []
         for asset in assets:
             # Hard filter: negative_tags exclude
             if negative_tags and set(negative_tags).intersection(asset.tags):
                 continue
-            rec = self._score(asset, profile, query_embedding, preferred_tags=preferred_tags)
+            rec = self._score(asset, profile, query_embedding, preferred_tags=preferred_tags, behavior=behavior)
             if rec.score >= self.CANDIDATE_MIN_SCORE:
                 recommendations.append(rec)
         # Prefer real assets over local placeholders once both clear the minimum score.
@@ -82,7 +84,49 @@ class RecommendationService:
         recommendations.sort(key=lambda item: (is_placeholder_created_by(item.asset.created_by), -item.score))
         return recommendations[:limit]
 
-    def _score(self, asset: AudioAsset, profile: UserProfile | None, query_embedding: list[float], preferred_tags: list[str] | None = None) -> Recommendation:
+    # Behavioral re-weighting bounds (applied after base score, before rounding).
+    BEHAVIOR_MAX_BOOST = 0.15
+    BEHAVIOR_MAX_PENALTY = 0.30
+
+    def _behavior_adjustment(self, asset: AudioAsset, signal: dict[str, float] | None) -> tuple[float, list[str]]:
+        """Turn a single asset's historical signals into a score delta + reasons.
+
+        Positive signals (completed / favorited / high rating / high avg
+        progress) boost the asset; negative signals (skipped / disliked) push
+        it down so the user stops being re-served things they rejected."""
+        if not signal:
+            return 0.0, []
+        delta = 0.0
+        reasons: list[str] = []
+
+        if signal.get("disliked", 0) > 0:
+            delta -= 0.30
+            reasons.append("曾标记不喜欢")
+        if signal.get("skipped", 0) > 0:
+            # Repeated skips penalize more, capped.
+            delta -= min(0.15, 0.06 * signal["skipped"])
+            reasons.append("曾多次跳过")
+        if signal.get("favorited", 0) > 0:
+            delta += 0.10
+            reasons.append("曾收藏")
+        if signal.get("completed", 0) > 0:
+            delta += min(0.08, 0.04 * signal["completed"])
+            reasons.append("曾完整收听")
+        max_rating = signal.get("max_rating", 0)
+        if max_rating >= 4:
+            delta += 0.05
+            reasons.append("历史高评分")
+        elif 0 < max_rating <= 2:
+            delta -= 0.08
+            reasons.append("历史低评分")
+        # Strong completion behavior (listened most of the way through).
+        if signal.get("avg_progress", 0) >= 0.8:
+            delta += 0.03
+
+        delta = max(-self.BEHAVIOR_MAX_PENALTY, min(self.BEHAVIOR_MAX_BOOST, delta))
+        return delta, reasons
+
+    def _score(self, asset: AudioAsset, profile: UserProfile | None, query_embedding: list[float], preferred_tags: list[str] | None = None, behavior: dict[str, dict[str, float]] | None = None) -> Recommendation:
         reasons: list[str] = []
         score = 0.0
 
@@ -124,9 +168,17 @@ class RecommendationService:
                 reasons.append("匹配时长偏好")
             score += min(0.15, profile_score)
 
+        # Behavioral memory: nudge the score by what the user did with this
+        # asset historically (read from playback_history via behavior_signals).
+        if behavior is not None:
+            delta, behavior_reasons = self._behavior_adjustment(asset, behavior.get(asset.id))
+            if delta:
+                score += delta
+                reasons.extend(behavior_reasons)
+
         if not reasons:
             reasons.append("通用睡前内容")
-        return Recommendation(asset=asset, score=round(score, 4), reasons=reasons)
+        return Recommendation(asset=asset, score=round(max(0.0, score), 4), reasons=reasons)
 
     def _profile_text(self, profile: UserProfile | None) -> str:
         if profile is None:

@@ -1,9 +1,10 @@
 # Floppy 后端接口文档（前端对接版）
 
-> 版本：基于当前 `floppy_backend/main.py` 实现整理  
-> Base URL（本地）：`http://127.0.0.1:8000`（如用 8010 端口启动则替换为对应端口）  
-> 编码：请求与响应均为 `application/json; charset=utf-8`  
-> 鉴权：当前 MVP 无鉴权，`user_id` 由前端在路径中传入
+> 版本：基于当前 `floppy_backend/main.py` 实现整理
+> Base URL：`http://10.27.33.19:8000`
+> 　所有返回的音频地址（`audio_url` / `playback_url` / `streamUrl`）由后端用环境变量 `FLOPPY_PUBLIC_BASE_URL` 拼出，已统一为该地址，**不会出现 `127.0.0.1` / `localhost`**。换部署环境（公网/转发）时只需改 `.env` 里的 `FLOPPY_PUBLIC_BASE_URL` 并重启，接口代码无需改动。
+> 编码：请求与响应均为 `application/json; charset=utf-8`（上传接口为 `multipart/form-data`）
+> 鉴权：当前 MVP 无鉴权，CORS 全开，`user_id` 由前端在路径中传入（仅用于开发联调）
 
 ---
 
@@ -24,10 +25,12 @@
 | 状态码 | 含义 |
 |---|---|
 | 200 | 成功 |
-| 201 | 创建成功（playback start） |
+| 201 | 创建成功（playback start / upload） |
 | 202 | 已受理，异步处理中（生成任务 / remix） |
-| 400 | 参数错误 |
-| 404 | 资源不存在（profile / asset / job 未找到） |
+| 204 | 成功无返回体（删除 upload） |
+| 400 | 参数错误 / 上传文件类型不支持 |
+| 404 | 资源不存在（profile / asset / job / upload 未找到） |
+| 422 | 请求体校验失败（FastAPI 校验，如缺必填字段） |
 | 429 | 超出每日生成额度 / remix 频率限制 |
 
 ---
@@ -81,14 +84,15 @@
 ```json
 {
   "action": "play_asset",
-  "audio_url": "http://127.0.0.1:8000/audio/pregen/meditation/xxx.wav",
+  "audio_url": "http://10.27.33.19:8000/audio/pregen/meditation/xxx.wav",
   "asset": {
     "id": "aud_xxx",
     "type": "meditation",
     "title": "呼吸觉察·雨夜版",
     "duration_sec": 600,
-    "playback_url": "http://127.0.0.1:8000/audio/pregen/meditation/xxx.wav"
+    "playback_url": "http://10.27.33.19:8000/audio/pregen/meditation/xxx.wav"
   },
+  "reply_text": "好的，把注意力轻轻放在呼吸上，吸气时感受平静进来，呼气时让紧张慢慢流走。",
   "is_placeholder": false,
   "job_id": null,
   "job_status": null,
@@ -110,6 +114,7 @@
 | `action` | string | `play_asset`（命中播放）/ `generate_job`（生成）/ `no_match` |
 | `audio_url` | string \| null | 可播放 URL，前端播放器主用 |
 | `asset` | object \| null | 命中或生成成功的资产 |
+| `reply_text` | string | 聊天机器人口吻的自然语言回复，供 Chat「转文字」展示。始终返回；LLM 失败时回退模板文案，不会为空 |
 | `is_placeholder` | boolean | true 表示当前是占位音频（非真实成品） |
 | `job_id` / `job_status` | string \| null | 生成路径才有；Demo 接口已同步等待完成 |
 | `best_score` | number \| null | 检索最高分 |
@@ -119,6 +124,7 @@
 | `planner_meta` | object \| null | Planner 元信息（来源/置信度/耗时/降级原因） |
 
 > 注意：`/demo/chat` 内部使用固定的 `demo_user` 画像，仅用于演示。生产请走第 4、5 节接口。
+> `reply_text` 由对话 LLM 实时生成（复用 `dialog_system_prompt` 人设），会给本接口增加一次 LLM 往返延迟。
 
 ---
 
@@ -414,6 +420,68 @@
 
 ---
 
+## 6.5 首页语音意图（latest-wins）
+
+### POST `/voice/intent`
+
+首页语音输入专用。前端在一句话**说完**后调用（不发 partial），并自行实现 latest-wins：用户再说一句时把上一条标记为过期。后端原样回显关联 id，并在服务端也做 latest-wins 保护（被取代的旧 turn 跳过生成，省 provider 额度）。
+
+请求：
+
+```json
+{
+  "text": "我今晚想听放松一点的",
+  "conversationId": "home-session-xxx",
+  "clientRequestId": "uuid-12",
+  "turnIndex": 12,
+  "source": "voice",
+  "supersedesRequestId": "uuid-11",
+  "user_id": "demo_user"
+}
+```
+
+| 字段 | 类型 | 必填 | 说明 |
+|---|---|---|---|
+| `text` | string | 是 | 完整一句话，≥1 字符（注意字段名是 `text`，不是 `request_text`） |
+| `conversationId` | string | 是 | 同一会话内稳定不变，用于服务端按会话判断最新 turn |
+| `clientRequestId` | string | 是 | 本次请求唯一 id，后端原样回显 |
+| `turnIndex` | int | 是 | 单调递增的轮次号，服务端据此判断是否被取代 |
+| `source` | string | 否 | 默认 `voice` |
+| `supersedesRequestId` | string \| null | 否 | 被本次取代的上一条 id（当前仅作信息透传/日志） |
+| `user_id` | string | 否 | 默认 `demo_user` |
+
+响应：
+
+```json
+{
+  "conversationId": "home-session-xxx",
+  "clientRequestId": "uuid-12",
+  "turnIndex": 12,
+  "reply": "好的，给你放一段轻柔的海浪声，闭上眼睛，让身体慢慢沉下去。",
+  "audio_url": "http://10.27.33.19:8000/audio/xxx.mp3",
+  "asset": { "id": "aud_xxx", "title": "...", "durationSeconds": 600, "streamUrl": "http://10.27.33.19:8000/audio/xxx.mp3", "source": "Library", "category": "...", "artwork": { "...": "..." } },
+  "action": "play_asset",
+  "hit": true,
+  "best_score": 1.0,
+  "reasons": ["精确缓存命中"]
+}
+```
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `conversationId` / `clientRequestId` / `turnIndex` | — | 原样回显，前端据此匹配当前 active 请求 |
+| `reply` | string | 自然语言回复（同 `/demo/chat` 的 reply_text） |
+| `audio_url` | string \| null | 可播放 URL |
+| `asset` | object \| null | camelCase 的 `AudioItem`（同 Audio 页结构，见第 11 节） |
+| `action` | string | `play_asset` / `generate_job` / `no_match` / **`superseded`** |
+
+**latest-wins 关键约定：**
+- 前端只处理当前 active 请求的返回，靠 `clientRequestId` / `turnIndex` 匹配；旧请求即使晚回来也丢弃，不更新首页状态。
+- 服务端额外保护：若某个 turn 在到达或生成完成时已被同会话更新的 turn 取代，直接返回 `action="superseded"`、`reply=""`、`audio_url=null`、`reasons=["已被更新的语音请求取代"]`，**不消耗生成额度**。前端收到 `superseded` 直接忽略即可。
+- 服务端 tracker 为进程内内存（不持久化），重启丢失无影响——客户端才是 latest-wins 的最终裁决者。
+
+---
+
 ## 7. 播放历史与反馈
 
 ### POST `/users/{user_id}/playback` → 201
@@ -470,6 +538,8 @@
 ```
 
 响应：`{ "event_id": "evt_xxx" }`。常用 `event_type`：`audio_play_started` `audio_skipped` `audio_play_completed` `audio_liked` `audio_disliked`。
+
+> **行为记忆（推荐会回读历史）**：通过 `POST /users/{user_id}/playback/{record_id}/feedback` 上报的 `favorite` / `dislike` / `skip` / `complete` / 评分，以及播放进度，会被推荐算法回读并影响后续排序——收藏/完整收听/高评分的同类加权，标记不喜欢/多次跳过的降权剔除。推荐 `reasons` 里会出现「曾收藏」「曾完整收听」「历史高评分」「曾标记不喜欢」「曾多次跳过」等可解释理由。因此前端应在播放结束/用户操作时如实上报反馈，agent 才能「越用越懂」。
 
 ---
 
@@ -536,6 +606,96 @@
 
 ---
 
+## 8.5 Android Audio 页（Library / Uploads / History）
+
+> 这一组接口返回 **camelCase 的 `AudioItem` / `UploadItem`**，直接对接 Android 客户端模型，与上面 snake_case 的 `asset` 结构不同。
+
+### AudioItem 结构（camelCase）
+
+```json
+{
+  "id": "aud_xxx",
+  "title": "轻柔的雨声呼吸放松",
+  "subtitle": "anxiety_relief",
+  "durationSeconds": 1133,
+  "streamUrl": "http://10.27.33.19:8000/audio/xxx.mp3",
+  "coverUrl": null,
+  "artwork": { "imageUrl": null, "seedColor": 4284246976, "prompt": "...", "status": "Ready" },
+  "source": "Library",
+  "category": "Meditation",
+  "playbackProgress": 0.0,
+  "isGenerated": false
+}
+```
+
+- `streamUrl` 必为非空可播地址（空会被前端过滤掉）。支持 HTTP Range（ExoPlayer 可直接播）。
+- `source`：`Library` | `Upload` | `Generated`。
+- `category`：由音频类型映射（Sleep stories / Meditation / White noise / Sleep music / ASMR / Podcast）。
+- `artwork.seedColor`：按类型生成的稳定 ARGB 色值；`coverUrl`/`imageUrl` 暂为 null，前端用 seedColor 渲染封面背景。
+- `durationSeconds`：库内音频为真实秒数；用户上传的音频暂为 0（后端未解码），前端可用 ExoPlayer 读真实时长。
+
+### GET `/users/{user_id}/audio-library`
+
+聚合接口，一次拉全三个 tab：
+
+```json
+{ "recommended": [AudioItem], "uploads": [UploadItem], "history": [AudioItem] }
+```
+
+- Library tab 用 `recommended`。无画像时回退展示 catalog，保证不空。
+- 也可分别调 `GET /users/{user_id}/audio/recommended?limit=30`。
+
+### Uploads
+
+```text
+POST   /users/{user_id}/uploads                  # multipart/form-data，字段名必须是 file
+GET    /users/{user_id}/uploads
+GET    /users/{user_id}/uploads/{upload_id}
+POST   /users/{user_id}/uploads/{upload_id}/complete
+POST   /users/{user_id}/uploads/{upload_id}/retry
+DELETE /users/{user_id}/uploads/{upload_id}       # 204
+```
+
+UploadItem：
+
+```json
+{
+  "id": "upload_xxx",
+  "fileName": "demo.mp3",
+  "fileType": "mp3",
+  "sizeLabel": "2.4M",
+  "progress": 1.0,
+  "status": "Completed",
+  "message": null,
+  "generatedAudio": { "...AudioItem...": "source=Upload" }
+}
+```
+
+- 支持类型：`mp3` `wav` `m4a` `pdf` `txt`。其他（如 jpg/png）返回 **400**。
+- mp3/wav/m4a：上传后 `status="Completed"`，**`generatedAudio` 非空**（即上传文件本身，`source="Upload"`，`streamUrl` 可播）——前端可直接点击播放。
+- pdf/txt：`status="Completed"`、`generatedAudio=null`、`message="待生成音频"`（生成流水线未接，前端显示「待处理」、点击无效，符合预期）。
+
+### History
+
+```text
+GET   /users/{user_id}/audio/history?limit=50      # 返回 AudioItem[]
+POST  /users/{user_id}/audio/history               # 上报播放
+PATCH /users/{user_id}/audio/history/{audio_id}    # 更新进度
+```
+
+上报请求体（POST）：
+
+```json
+{ "audioId": "aud_xxx", "source": "Library", "positionSeconds": 0, "durationSeconds": 180, "playbackProgress": 0.45, "event": "play" }
+```
+
+- `event`：`play` | `progress` | `complete`。
+- 返回完整 `AudioItem`（含 `streamUrl`/`title`/`subtitle`/`source`/`playbackProgress`），不只 audioId。
+- `source` 由后端按播放来源准确映射：recommend→Library、generated/remix→Generated、import→Upload。
+- `playbackProgress` 范围 0.0–1.0。
+
+---
+
 ## 9. 枚举与数据说明
 
 音频类型 `AudioType`：`white_noise` `music` `asmr` `story` `meditation` `podcast_digest`
@@ -552,6 +712,12 @@
 - remix 输出资产带 `remix` 标签，可参与推荐
 - 默认命中阈值 `threshold = 0.58`
 - 默认每日额度：字符 200000、生成次数 10（超出返回 429）
+
+camelCase（Audio 页/语音意图）相关：
+- `source`：`Library` | `Upload` | `Generated`
+- `UploadItem.status`：`Idle` | `Uploading` | `Failed` | `Completed`
+- `artwork.status`：`Pending` | `Generating` | `Ready` | `Failed`
+- `/voice/intent` 的 `action` 额外有 `superseded`（被更新的 turn 取代，前端忽略）
 
 ---
 

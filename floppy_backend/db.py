@@ -172,6 +172,25 @@ CREATE TABLE IF NOT EXISTS remix_jobs (
 
 CREATE INDEX IF NOT EXISTS idx_remix_jobs_user
 ON remix_jobs(user_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS uploads (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    file_name TEXT NOT NULL,
+    file_type TEXT NOT NULL,
+    mime_type TEXT,
+    size_bytes INTEGER NOT NULL DEFAULT 0,
+    object_key TEXT,
+    progress REAL NOT NULL DEFAULT 0.0,
+    status TEXT NOT NULL DEFAULT 'Idle',
+    message TEXT,
+    generated_asset_id TEXT REFERENCES audio_assets(id),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_uploads_user
+ON uploads(user_id, created_at DESC);
 """
 
 

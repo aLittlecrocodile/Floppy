@@ -656,6 +656,50 @@ class Repository:
             morning_feedback=r["morning_feedback"],
         ) for r in rows]
 
+    def behavior_signals(self, user_id: str, *, lookback: int = 200) -> dict[str, dict[str, float]]:
+        """Aggregate per-asset behavioral signals from a user's playback history,
+        so recommendation can re-weight based on what the user actually did
+        (completed / skipped / disliked / favorited / rated) rather than only
+        the static profile. Read-only; used to give the agent a real memory of
+        listening behavior.
+
+        Returns {asset_id: {completed, skipped, disliked, favorited,
+        avg_progress, max_rating, plays}}.
+        """
+        with self._lock:
+            rows = self.conn.execute(
+                """SELECT asset_id, progress, rating, feedback_type, completed_at
+                FROM playback_history WHERE user_id = ?
+                ORDER BY started_at DESC LIMIT ?""",
+                (user_id, lookback),
+            ).fetchall()
+        signals: dict[str, dict[str, float]] = {}
+        for r in rows:
+            aid = r["asset_id"]
+            s = signals.setdefault(aid, {
+                "completed": 0.0, "skipped": 0.0, "disliked": 0.0,
+                "favorited": 0.0, "progress_sum": 0.0, "max_rating": 0.0, "plays": 0.0,
+            })
+            s["plays"] += 1
+            s["progress_sum"] += r["progress"] or 0.0
+            ft = r["feedback_type"]
+            if r["completed_at"] is not None or ft == "complete":
+                s["completed"] += 1
+            if ft == "skip":
+                s["skipped"] += 1
+            if ft == "dislike":
+                s["disliked"] += 1
+            if ft == "favorite":
+                s["favorited"] += 1
+            if r["rating"] is not None:
+                s["max_rating"] = max(s["max_rating"], float(r["rating"]))
+        for s in signals.values():
+            plays = s["plays"] or 1.0
+            s["avg_progress"] = s["progress_sum"] / plays
+            del s["progress_sum"]
+        return signals
+
+
     # --- Remix Jobs / Sessions ---
 
     def create_remix_job(self, user_id: str, voice_asset_id: str, ambient_asset_id: str | None, ambient_tags: list[str], voice_volume: float, ambient_volume: float, sound_type: str | None = None, intent: str | None = None, mix_params: MixParams | None = None, foreground_source: str | None = None, generation_job_id: str | None = None) -> str:
@@ -740,3 +784,69 @@ class Repository:
             progress=row["progress"], rating=row["rating"], feedback_type=row["feedback_type"],
             morning_feedback=row["morning_feedback"],
         )
+
+    def latest_progress_by_asset(self, user_id: str) -> dict[str, float]:
+        """Most-recent playback progress per asset, for History playbackProgress."""
+        with self._lock:
+            rows = self.conn.execute(
+                """SELECT asset_id, progress FROM playback_history
+                WHERE user_id = ? ORDER BY started_at DESC""",
+                (user_id,),
+            ).fetchall()
+        out: dict[str, float] = {}
+        for r in rows:
+            if r["asset_id"] not in out:
+                out[r["asset_id"]] = r["progress"] or 0.0
+        return out
+
+    # --- Uploads ---
+
+    def create_upload(self, user_id: str, *, file_name: str, file_type: str, mime_type: str | None,
+                      size_bytes: int, object_key: str | None, status: str = "Uploading") -> str:
+        self.ensure_user(user_id)
+        now = utcnow()
+        upload_id = stable_id("upload", {"user_id": user_id, "file_name": file_name, "at": now.isoformat()})
+        with self._lock:
+            self.conn.execute(
+                """INSERT INTO uploads (id, user_id, file_name, file_type, mime_type, size_bytes,
+                    object_key, progress, status, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, 0.0, ?, ?, ?)""",
+                (upload_id, user_id, file_name, file_type, mime_type, size_bytes,
+                 object_key, status, now.isoformat(), now.isoformat()),
+            )
+            self.conn.commit()
+        return upload_id
+
+    def update_upload(self, upload_id: str, *, status: str | None = None, progress: float | None = None,
+                      message: str | None = None, generated_asset_id: str | None = None,
+                      object_key: str | None = None) -> None:
+        with self._lock:
+            self.conn.execute(
+                """UPDATE uploads SET
+                    status = COALESCE(?, status),
+                    progress = COALESCE(?, progress),
+                    message = COALESCE(?, message),
+                    generated_asset_id = COALESCE(?, generated_asset_id),
+                    object_key = COALESCE(?, object_key),
+                    updated_at = ?
+                WHERE id = ?""",
+                (status, progress, message, generated_asset_id, object_key, utcnow().isoformat(), upload_id),
+            )
+            self.conn.commit()
+
+    def get_upload(self, upload_id: str) -> sqlite3.Row | None:
+        with self._lock:
+            return self.conn.execute("SELECT * FROM uploads WHERE id = ?", (upload_id,)).fetchone()
+
+    def list_uploads(self, user_id: str, limit: int = 100) -> list[sqlite3.Row]:
+        with self._lock:
+            return self.conn.execute(
+                "SELECT * FROM uploads WHERE user_id = ? ORDER BY created_at DESC LIMIT ?",
+                (user_id, limit),
+            ).fetchall()
+
+    def delete_upload(self, upload_id: str) -> None:
+        with self._lock:
+            self.conn.execute("DELETE FROM uploads WHERE id = ?", (upload_id,))
+            self.conn.commit()
+

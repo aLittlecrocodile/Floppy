@@ -4,9 +4,12 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 import asyncio
 import json
+import re
 import time
+import urllib.request
 
-from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import BackgroundTasks, Depends, FastAPI, File, Form, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse
 
 from floppy_backend.config import Settings, get_settings
@@ -44,6 +47,13 @@ from floppy_backend.models import (
     UserProfileIn,
     UserQuestionnaire,
     UserQuestionnaireIn,
+    AudioItem,
+    AudioLibrary,
+    UploadItem,
+    HistoryReportIn,
+    HistoryProgressPatchIn,
+    VoiceIntentIn,
+    VoiceIntentResponse,
 )
 from floppy_backend.providers.audio import build_audio_provider
 from floppy_backend.repositories import Repository
@@ -57,6 +67,11 @@ from floppy_backend.services.recommendation import RecommendationService
 from floppy_backend.services.remix import RemixService
 from floppy_backend.services.script import SleepScriptService
 from floppy_backend.services.agent_graph import AgentGraphBuilder
+from floppy_backend.services.audio_page import (
+    asset_to_audio_item,
+    category_for,
+    upload_row_to_item,
+)
 from floppy_backend.storage import LocalFileStorage
 
 
@@ -72,6 +87,37 @@ class AppState:
 
 
 state = AppState()
+
+
+class _ConversationTracker:
+    """Server-side latest-wins guard for voice intents.
+
+    Tracks the highest turnIndex seen per conversationId so that a stale turn
+    (one the client has already superseded by speaking again) can skip the
+    expensive generation path instead of burning provider quota on a result the
+    client will discard anyway. In-memory only — process-local, which is fine
+    because latest-wins is best-effort and the client is the source of truth."""
+
+    def __init__(self) -> None:
+        from threading import Lock
+        self._lock = Lock()
+        self._latest: dict[str, int] = {}
+
+    def observe(self, conversation_id: str, turn_index: int) -> int:
+        """Record this turn and return the current latest turnIndex for the
+        conversation (>= turn_index)."""
+        with self._lock:
+            latest = max(self._latest.get(conversation_id, -1), turn_index)
+            self._latest[conversation_id] = latest
+            return latest
+
+    def is_superseded(self, conversation_id: str, turn_index: int) -> bool:
+        with self._lock:
+            return turn_index < self._latest.get(conversation_id, -1)
+
+
+conversation_tracker = _ConversationTracker()
+
 
 
 @asynccontextmanager
@@ -169,6 +215,17 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Floppy Backend MVP", version="0.1.0", lifespan=lifespan)
+
+# Dev CORS: 前端跑在其他机器上，开发阶段放开所有来源。
+# allow_origin_regex=".*" 配合 allow_credentials=True 可让浏览器带凭证跨域；
+# 上线前应收紧为具体前端域名白名单。
+app.add_middleware(
+    CORSMiddleware,
+    allow_origin_regex=".*",
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 def repo() -> Repository:
@@ -355,6 +412,59 @@ def voice_page():
     return VOICE_HTML.replace("__SCRIPT__", VOICE_SCRIPT)
 
 
+# Strip the [AUDIO:type] routing marker the dialog prompt emits for the voice
+# stream — Chat only needs the natural-language sentence, not the marker.
+_AUDIO_MARKER_RE = re.compile(r"^\s*\[AUDIO:[^\]]*\]\s*")
+
+
+def _chat_reply_fallback(action: str) -> str:
+    """Template reply used when the LLM is unavailable, so reply_text is never
+    null. Tone matches dialog_system_prompt (gentle, 1 short sentence)."""
+    if action == "generate_job":
+        return "好的，我正在为你准备一段专属的助眠音频，稍等一下。"
+    return "好的，给你找了一段适合现在听的音频，慢慢放松下来。"
+
+
+def _generate_reply_text(request_text: str, action: str, settings: Settings) -> str:
+    """Synchronously ask the dialog LLM for a chatbot-style reply, reusing the
+    dialog system prompt. Returns a template fallback on any failure so the
+    field is always populated. The [AUDIO:type] marker is stripped."""
+    api_key = settings.dialog_llm_api_key or settings.query_planner_api_key
+    if not api_key:
+        return _chat_reply_fallback(action)
+
+    base_url = (settings.dialog_llm_base_url or settings.query_planner_base_url).rstrip("/")
+    model = settings.dialog_llm_model or settings.query_planner_model
+    payload = {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": settings.dialog_system_prompt},
+            {"role": "user", "content": request_text},
+        ],
+        "temperature": settings.dialog_temperature,
+        "max_tokens": settings.dialog_max_tokens,
+        "stream": False,
+    }
+    try:
+        req = urllib.request.Request(
+            f"{base_url}/chat/completions",
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=settings.query_planner_timeout_sec) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        choice = data["choices"][0]
+        content = (choice["message"].get("content") or "").strip()
+        if not content:
+            content = (choice["message"].get("reasoning_content") or "").strip()
+    except Exception:  # noqa: BLE001 — reply is best-effort; fall back to template
+        return _chat_reply_fallback(action)
+
+    content = _AUDIO_MARKER_RE.sub("", content).strip()
+    return content or _chat_reply_fallback(action)
+
+
 @app.post("/demo/chat")
 def demo_chat(payload: dict):
     request_text = str(payload.get("request_text", "")).strip()
@@ -377,27 +487,15 @@ def demo_chat(payload: dict):
         ),
     )
 
-    response = state.agent_runtime.run(AgentDecideRequest(user_id=demo_user, request_text=request_text, generation_allowed=True))
-    audio_url = response.asset.playback_url if response.asset else None
-
-    job = None
-    if response.action == "generate_job" and response.job_id:
-        state.generation_service.run_job(response.job_id, demo_user, GenerationRequest(request_text=request_text, force_generate=True))
-        for _ in range(5):
-            job = state.repository.get_generation_job(response.job_id)
-            if job and job.status in {"succeeded", "failed"}:
-                break
-            time.sleep(0.2)
-        if job and job.asset:
-            audio_url = state.storage.public_url(job.asset.object_key)
-
-    asset_data = response.asset.model_dump(mode="json") if response.asset else (job.asset.model_dump(mode="json") if job and job.asset else None)
-    is_placeholder = bool(asset_data and is_placeholder_created_by(asset_data.get("created_by")))
+    response, audio_url, job, asset_data, is_placeholder, reply_text = _run_chat_decision(
+        demo_user, request_text
+    )
 
     return {
         "action": response.action,
         "audio_url": audio_url,
         "asset": asset_data,
+        "reply_text": reply_text,
         "is_placeholder": is_placeholder,
         "job_id": response.job_id,
         "job_status": job.status if job else None,
@@ -407,6 +505,108 @@ def demo_chat(payload: dict):
         "reasons": response.reasons,
         "planner_meta": response.planner_meta.model_dump(mode="json") if response.planner_meta else None,
     }
+
+
+def _run_chat_decision(user_id: str, request_text: str) -> tuple:
+    """Shared agent decision + (optional) synchronous generation used by both
+    /demo/chat and /voice/intent. Returns (response, audio_url, job, asset_data,
+    is_placeholder, reply_text)."""
+    response = state.agent_runtime.run(
+        AgentDecideRequest(user_id=user_id, request_text=request_text, generation_allowed=True)
+    )
+    audio_url = response.asset.playback_url if response.asset else None
+
+    job = None
+    if response.action == "generate_job" and response.job_id:
+        state.generation_service.run_job(
+            response.job_id, user_id, GenerationRequest(request_text=request_text, force_generate=True)
+        )
+        for _ in range(5):
+            job = state.repository.get_generation_job(response.job_id)
+            if job and job.status in {"succeeded", "failed"}:
+                break
+            time.sleep(0.2)
+        if job and job.asset:
+            audio_url = state.storage.public_url(job.asset.object_key)
+
+    asset_data = response.asset.model_dump(mode="json") if response.asset else (
+        job.asset.model_dump(mode="json") if job and job.asset else None
+    )
+    is_placeholder = bool(asset_data and is_placeholder_created_by(asset_data.get("created_by")))
+    reply_text = _generate_reply_text(request_text, response.action, get_settings())
+    return response, audio_url, job, asset_data, is_placeholder, reply_text
+
+
+@app.post("/voice/intent", response_model=VoiceIntentResponse)
+def voice_intent(payload: VoiceIntentIn):
+    """Home-screen voice intent endpoint with latest-wins correlation.
+
+    The backend echoes conversationId / clientRequestId / turnIndex verbatim so
+    the client can discard stale responses. Server-side latest-wins: a turn that
+    has already been superseded by a newer turn in the same conversation skips
+    the costly generation step (action="superseded"), saving provider quota on
+    a result the client would drop anyway. supersedesRequestId is advisory."""
+    text = payload.text.strip()
+    if len(text) < 1:
+        raise HTTPException(status_code=400, detail="text is required")
+
+    # Register this turn; if a newer turn already arrived, short-circuit.
+    conversation_tracker.observe(payload.conversationId, payload.turnIndex)
+    if conversation_tracker.is_superseded(payload.conversationId, payload.turnIndex):
+        return VoiceIntentResponse(
+            conversationId=payload.conversationId,
+            clientRequestId=payload.clientRequestId,
+            turnIndex=payload.turnIndex,
+            reply="",
+            audio_url=None,
+            asset=None,
+            action="superseded",
+            hit=False,
+            best_score=None,
+            reasons=["已被更新的语音请求取代"],
+        )
+
+    response, audio_url, job, asset_data, _is_placeholder, reply_text = _run_chat_decision(
+        payload.user_id, text
+    )
+
+    # The user may have spoken again while we were generating; if so, drop the
+    # result rather than returning a stale audio that overwrites home state.
+    if conversation_tracker.is_superseded(payload.conversationId, payload.turnIndex):
+        return VoiceIntentResponse(
+            conversationId=payload.conversationId,
+            clientRequestId=payload.clientRequestId,
+            turnIndex=payload.turnIndex,
+            reply="",
+            audio_url=None,
+            asset=None,
+            action="superseded",
+            hit=False,
+            best_score=None,
+            reasons=["已被更新的语音请求取代"],
+        )
+
+    audio_item = None
+    if response.asset is not None:
+        audio_item = asset_to_audio_item(
+            response.asset, state.storage,
+            source="Generated" if response.action == "generate_job" else "Library",
+        )
+    elif job is not None and job.asset is not None:
+        audio_item = asset_to_audio_item(job.asset, state.storage, source="Generated")
+
+    return VoiceIntentResponse(
+        conversationId=payload.conversationId,
+        clientRequestId=payload.clientRequestId,
+        turnIndex=payload.turnIndex,
+        reply=reply_text,
+        audio_url=audio_url,
+        asset=audio_item,
+        action=response.action,
+        hit=response.search.hit,
+        best_score=response.search.best_score,
+        reasons=response.reasons,
+    )
 
 
 @app.post("/admin/seed")
@@ -472,6 +672,207 @@ def recommend(user_id: str, limit: int = 5, query: str | None = None):
     for item in recommendations:
         item.asset.playback_url = state.storage.public_url(item.asset.object_key)
     return recommendations
+
+
+# --- Android Audio page: Library / Uploads / History ---
+
+
+def _recommended_items(user_id: str, limit: int = 30) -> list[AudioItem]:
+    """Recommended items for the Library tab. Falls back to the catalog when the
+    user has no profile yet, so a fresh client still sees content."""
+    recs = state.recommendation_service.recommend(user_id, limit=limit, query=None)
+    if recs:
+        return [
+            asset_to_audio_item(r.asset, state.storage, source="Library")
+            for r in recs
+        ]
+    # No profile / no recs -> show top catalog assets so the tab isn't empty.
+    assets = state.repository.list_assets(limit=limit)
+    return [asset_to_audio_item(a, state.storage, source="Library") for a in assets]
+
+
+def _upload_items(user_id: str) -> list[UploadItem]:
+    items: list[UploadItem] = []
+    for row in state.repository.list_uploads(user_id):
+        generated_asset = (
+            state.repository.get_asset(row["generated_asset_id"])
+            if row["generated_asset_id"]
+            else None
+        )
+        items.append(upload_row_to_item(row, state.storage, generated_asset=generated_asset))
+    return items
+
+
+def _history_items(user_id: str, limit: int = 50) -> list[AudioItem]:
+    records = state.repository.list_playback_history(user_id, limit=limit)
+    items: list[AudioItem] = []
+    for rec in records:
+        asset = state.repository.get_asset(rec.asset_id)
+        if asset is None:
+            continue
+        # PlaybackSource (recommend/generated/remix/import) -> frontend source.
+        if rec.source in ("generated", "remix"):
+            src = "Generated"
+        elif rec.source == "import":
+            src = "Upload"
+        else:
+            src = "Library"
+        items.append(
+            asset_to_audio_item(
+                asset, state.storage, source=src, playback_progress=rec.progress
+            )
+        )
+    return items
+
+
+@app.get("/users/{user_id}/audio-library", response_model=AudioLibrary)
+def audio_library(user_id: str):
+    """Aggregated payload for the Audio page: one call returns all three tabs."""
+    return AudioLibrary(
+        recommended=_recommended_items(user_id),
+        uploads=_upload_items(user_id),
+        history=_history_items(user_id),
+    )
+
+
+@app.get("/users/{user_id}/audio/recommended", response_model=list[AudioItem])
+def audio_recommended(user_id: str, limit: int = 30):
+    return _recommended_items(user_id, limit=min(limit, 50))
+
+
+@app.get("/users/{user_id}/audio/history", response_model=list[AudioItem])
+def audio_history(user_id: str, limit: int = 50):
+    return _history_items(user_id, limit=min(limit, 50))
+
+
+@app.post("/users/{user_id}/audio/history", response_model=AudioItem)
+def report_audio_history(user_id: str, payload: HistoryReportIn):
+    asset = state.repository.get_asset(payload.audioId)
+    if asset is None:
+        raise HTTPException(status_code=404, detail="asset not found")
+    # Map frontend source back to a PlaybackSource value.
+    source_map = {"Library": "recommend", "Generated": "generated", "Upload": "import"}
+    pb_source = source_map.get(payload.source, "recommend")
+    record_id = state.repository.record_playback_start(
+        user_id, payload.audioId, asset.title, pb_source
+    )
+    completed = payload.event == "complete"
+    state.repository.update_playback_feedback(
+        record_id,
+        feedback_type="complete" if completed else None,
+        progress=payload.playbackProgress,
+        completed=completed,
+    )
+    return asset_to_audio_item(
+        asset, state.storage, source=payload.source, playback_progress=payload.playbackProgress
+    )
+
+
+@app.patch("/users/{user_id}/audio/history/{audio_id}", response_model=AudioItem)
+def patch_audio_history(user_id: str, audio_id: str, payload: HistoryProgressPatchIn):
+    asset = state.repository.get_asset(audio_id)
+    if asset is None:
+        raise HTTPException(status_code=404, detail="asset not found")
+    record_id = state.repository.record_playback_start(
+        user_id, audio_id, asset.title, "recommend"
+    )
+    completed = payload.playbackProgress >= 0.99
+    state.repository.update_playback_feedback(
+        record_id,
+        feedback_type="complete" if completed else None,
+        progress=payload.playbackProgress,
+        completed=completed,
+    )
+    return asset_to_audio_item(
+        asset, state.storage, playback_progress=payload.playbackProgress
+    )
+
+
+# --- Uploads (direct multipart upload) ---
+
+_ALLOWED_UPLOAD_TYPES = {"pdf", "txt", "mp3", "wav", "m4a"}
+
+
+def _resolve_upload_item(user_id: str, upload_id: str) -> UploadItem:
+    row = state.repository.get_upload(upload_id)
+    if row is None or row["user_id"] != user_id:
+        raise HTTPException(status_code=404, detail="upload not found")
+    generated_asset = (
+        state.repository.get_asset(row["generated_asset_id"])
+        if row["generated_asset_id"]
+        else None
+    )
+    return upload_row_to_item(row, state.storage, generated_asset=generated_asset)
+
+
+@app.post("/users/{user_id}/uploads", response_model=UploadItem, status_code=201)
+async def create_upload(user_id: str, file: UploadFile = File(...)):
+    file_name = file.filename or "upload"
+    ext = file_name.rsplit(".", 1)[-1].lower() if "." in file_name else ""
+    if ext not in _ALLOWED_UPLOAD_TYPES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"unsupported file type '{ext}'. allowed: {sorted(_ALLOWED_UPLOAD_TYPES)}",
+        )
+    data = await file.read()
+    size_bytes = len(data)
+    object_key = f"uploads/{user_id}/{file_name}"
+    path = state.storage.path_for(object_key)
+    path.write_bytes(data)
+    is_playable_audio = ext in ("mp3", "wav", "m4a")
+    upload_id = state.repository.create_upload(
+        user_id,
+        file_name=file_name,
+        file_type=ext,
+        mime_type=file.content_type,
+        size_bytes=size_bytes,
+        object_key=object_key,
+        status="Completed",
+    )
+    # Audio uploads are immediately playable (file == audio). pdf/txt have no
+    # generation pipeline wired yet: they're stored as Completed but the client
+    # shows "待处理" because generatedAudio stays null (method A).
+    message = None if is_playable_audio else "待生成音频"
+    state.repository.update_upload(upload_id, progress=1.0, message=message)
+    return _resolve_upload_item(user_id, upload_id)
+
+
+@app.get("/users/{user_id}/uploads", response_model=list[UploadItem])
+def list_uploads(user_id: str):
+    return _upload_items(user_id)
+
+
+@app.get("/users/{user_id}/uploads/{upload_id}", response_model=UploadItem)
+def get_upload(user_id: str, upload_id: str):
+    return _resolve_upload_item(user_id, upload_id)
+
+
+@app.post("/users/{user_id}/uploads/{upload_id}/complete", response_model=UploadItem)
+def complete_upload(user_id: str, upload_id: str):
+    row = state.repository.get_upload(upload_id)
+    if row is None or row["user_id"] != user_id:
+        raise HTTPException(status_code=404, detail="upload not found")
+    state.repository.update_upload(upload_id, status="Completed", progress=1.0)
+    return _resolve_upload_item(user_id, upload_id)
+
+
+@app.post("/users/{user_id}/uploads/{upload_id}/retry", response_model=UploadItem)
+def retry_upload(user_id: str, upload_id: str):
+    row = state.repository.get_upload(upload_id)
+    if row is None or row["user_id"] != user_id:
+        raise HTTPException(status_code=404, detail="upload not found")
+    state.repository.update_upload(upload_id, status="Uploading", progress=0.0, message=None)
+    return _resolve_upload_item(user_id, upload_id)
+
+
+@app.delete("/users/{user_id}/uploads/{upload_id}", status_code=204)
+def delete_upload(user_id: str, upload_id: str):
+    row = state.repository.get_upload(upload_id)
+    if row is None or row["user_id"] != user_id:
+        raise HTTPException(status_code=404, detail="upload not found")
+    state.repository.delete_upload(upload_id)
+    return None
+
 
 
 @app.post("/users/{user_id}/generate-audio", response_model=GenerationResponse)

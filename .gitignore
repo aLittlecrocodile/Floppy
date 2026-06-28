@@ -8,6 +8,7 @@ __pycache__/
 data/
 storage/
 .env
+.claude/
 .ccb/
 .ccb-ducc-ccb
 .comate/
