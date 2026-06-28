@@ -482,6 +482,62 @@
 
 ---
 
+## 6.6 语音转文字（ASR）
+
+> 主路用 WebSocket 实时流式，兜底用 HTTP 整段文件上传。两者后端都走火山引擎大模型流式 ASR。
+
+### WebSocket `/v1/speech/stream`（主路，实时）
+
+App 连接 `ws://10.27.245.10:8000/v1/speech/stream`。
+
+**协议时序：**
+
+1. 客户端连接成功后先发首包：
+```json
+{ "type": "start", "locale": "zh-CN", "sample_rate": 16000, "encoding": "pcm_s16le", "channels": 1 }
+```
+2. 之后持续发 **binary** WebSocket 帧：PCM 16-bit little-endian、16000 Hz、单声道。
+3. 用户停止时发：
+```json
+{ "type": "stop" }
+```
+
+**服务端返回（text 帧）：**
+- 边识别边返回（实时显示）：
+```json
+{ "type": "partial", "text": "我今晚想" }
+```
+- 一句话结束（句子 definite / 收到 stop）：
+```json
+{ "type": "final", "text": "我今晚想听一点放松的内容" }
+```
+- 失败：
+```json
+{ "type": "error", "message": "识别失败" }
+```
+
+约定：后端收到 `stop` 后**先返回 final 或 error，再结束本轮**，不会直接断开。App 收到 `final` 后调用现有 `completeSpeechListening(text)` → `submitTextIntent(text, source="voice")`；收到 `error` 自动 fallback 到下面的整段上传接口。
+
+### POST `/v1/speech/transcriptions`（兜底，整段文件）
+
+`Content-Type: multipart/form-data`
+
+| 字段 | 说明 |
+|---|---|
+| `file` | 音频文件，Android 录的是 m4a（`mime=audio/mp4`，AAC 编码）。后端用 ffmpeg 解码，支持 m4a/aac/mp3/wav 等 |
+| `locale` | `zh-CN` |
+| `source` | `android_home` |
+
+返回固定格式：
+```json
+{ "text": "识别出来的文字" }
+```
+
+- 没识别到内容返回 `{ "text": "" }`。
+- 失败返回 `5xx` + `{ "detail": "transcription failed: ..." }`，App 提示「语音转文字失败」。
+
+---
+
 ## 7. 播放历史与反馈
 
 ### POST `/users/{user_id}/playback` → 201

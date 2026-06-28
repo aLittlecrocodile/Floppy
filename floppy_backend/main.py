@@ -241,6 +241,178 @@ def health(settings: Settings = Depends(get_settings)):
     return {"status": "ok", "app": settings.app_name}
 
 
+# --- Speech-to-text (ASR) for the Android home screen ---
+# Two endpoints, both backed by the same Volcengine streaming ASR client:
+#   1. WebSocket /v1/speech/stream  — primary: client streams 16k/mono PCM,
+#      server returns partial/final text live.
+#   2. POST /v1/speech/transcriptions — fallback: client uploads a whole m4a
+#      file, server decodes to PCM via ffmpeg and returns the final text.
+
+_ASR_PCM_CHUNK = 16000  # ~0.5s of 16k/mono/16bit PCM per frame fed to Volc
+
+
+async def _decode_to_pcm_chunks(data: bytes, chunk_size: int = _ASR_PCM_CHUNK):
+    """Decode an arbitrary audio container (m4a/aac/mp3/wav...) to raw 16k
+    mono s16le PCM via ffmpeg, yielding fixed-size chunks. ffmpeg reads from
+    stdin and writes PCM to stdout — no temp files."""
+    proc = await asyncio.create_subprocess_exec(
+        "ffmpeg", "-hide_banner", "-loglevel", "error",
+        "-i", "pipe:0",
+        "-f", "s16le", "-acodec", "pcm_s16le", "-ac", "1", "-ar", "16000",
+        "pipe:1",
+        stdin=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+
+    async def _feed():
+        try:
+            proc.stdin.write(data)
+            await proc.stdin.drain()
+        finally:
+            proc.stdin.close()
+
+    feed_task = asyncio.create_task(_feed())
+    try:
+        while True:
+            chunk = await proc.stdout.read(chunk_size)
+            if not chunk:
+                break
+            yield chunk
+    finally:
+        await feed_task
+        err = await proc.stderr.read()
+        rc = await proc.wait()
+        if rc != 0:
+            raise RuntimeError(f"ffmpeg decode failed (rc={rc}): {err.decode('utf-8', 'replace')[:300]}")
+
+
+async def _transcribe_pcm_stream(pcm_iter) -> str:
+    """Run a PCM async-iterator through Volc streaming ASR and return the final
+    cumulative text (best effort: keeps the longest text seen)."""
+    from floppy_backend.providers.volc_asr import VolcStreamASR
+
+    asr = VolcStreamASR(get_settings())
+    final_text = ""
+    async for result in asr.stream_recognize(pcm_iter):
+        if result.text:
+            final_text = result.text
+    return final_text
+
+
+@app.post("/v1/speech/transcriptions")
+async def speech_transcriptions(
+    file: UploadFile = File(...),
+    locale: str = Form("zh-CN"),
+    source: str = Form("android_home"),
+):
+    """Fallback ASR: upload a whole audio file (Android sends m4a / audio/mp4),
+    decode to PCM, recognize, return {"text": "..."}. On failure returns 5xx
+    with a message so the client can show「语音转文字失败」."""
+    data = await file.read()
+    if not data:
+        raise HTTPException(status_code=400, detail="empty audio file")
+    try:
+        pcm_iter = _decode_to_pcm_chunks(data)
+        text = await _transcribe_pcm_stream(pcm_iter)
+    except Exception as exc:  # noqa: BLE001 — surface as 5xx for the client
+        raise HTTPException(status_code=500, detail=f"transcription failed: {exc}") from exc
+    # text may be "" when nothing was recognized — that's a valid response.
+    return {"text": text}
+
+
+@app.websocket("/v1/speech/stream")
+async def speech_stream(websocket: WebSocket):
+    """Primary ASR: client streams 16k/mono/s16le PCM, server returns live
+    partial/final text.
+
+    Protocol:
+      - Client → start frame:  {"type":"start","locale":"zh-CN","sample_rate":16000,"encoding":"pcm_s16le","channels":1}
+      - Client → binary frames: raw PCM 16-bit LE chunks
+      - Client → stop frame:   {"type":"stop"}
+      - Server → {"type":"partial","text":"..."} while recognizing
+      - Server → {"type":"final","text":"..."} when a sentence finalizes / on stop
+      - Server → {"type":"error","message":"识别失败"} on failure
+    Server does not close on stop until a final/error has been sent.
+    """
+    from floppy_backend.providers.volc_asr import VolcStreamASR
+
+    await websocket.accept()
+
+    pcm_queue: asyncio.Queue[bytes | None] = asyncio.Queue()
+
+    async def _pcm_iter():
+        while True:
+            chunk = await pcm_queue.get()
+            if chunk is None:
+                return
+            yield chunk
+
+    async def _recognize():
+        """Consume the PCM queue through Volc ASR, push partial/final back."""
+        try:
+            asr = VolcStreamASR(get_settings())
+            last_text = ""
+            async for result in asr.stream_recognize(_pcm_iter()):
+                if result.is_final:
+                    await websocket.send_text(json.dumps(
+                        {"type": "final", "text": result.text or last_text}, ensure_ascii=False))
+                    last_text = ""
+                elif result.text and result.text != last_text:
+                    last_text = result.text
+                    await websocket.send_text(json.dumps(
+                        {"type": "partial", "text": result.text}, ensure_ascii=False))
+        except Exception as exc:  # noqa: BLE001
+            try:
+                await websocket.send_text(json.dumps(
+                    {"type": "error", "message": f"识别失败: {exc}"}, ensure_ascii=False))
+            except Exception:  # noqa: BLE001 — socket may already be gone
+                pass
+
+    recognize_task: asyncio.Task | None = None
+    try:
+        while True:
+            message = await websocket.receive()
+            if message.get("type") == "websocket.disconnect":
+                break
+            # Text control frames.
+            if (text := message.get("text")) is not None:
+                try:
+                    payload = json.loads(text)
+                except json.JSONDecodeError:
+                    continue
+                mtype = payload.get("type")
+                if mtype == "start":
+                    if recognize_task is None:
+                        recognize_task = asyncio.create_task(_recognize())
+                elif mtype == "stop":
+                    # Signal end-of-audio; ASR will emit its final, then we stop.
+                    await pcm_queue.put(None)
+                    if recognize_task is not None:
+                        await recognize_task
+                        recognize_task = None
+                    # Tell the client we're done with this utterance; keep socket
+                    # open in case the client wants another turn.
+                    break
+            # Binary audio frames.
+            elif (chunk := message.get("bytes")) is not None:
+                if recognize_task is None:
+                    # Tolerate clients that stream before sending start.
+                    recognize_task = asyncio.create_task(_recognize())
+                await pcm_queue.put(chunk)
+    except WebSocketDisconnect:
+        pass
+    finally:
+        await pcm_queue.put(None)
+        if recognize_task is not None:
+            recognize_task.cancel()
+        try:
+            await websocket.close()
+        except Exception:  # noqa: BLE001
+            pass
+
+
+
 def _ensure_demo_profile(user_id: str) -> None:
     """Make sure a user has a profile (catalog is seeded at startup).
 
