@@ -29,7 +29,7 @@
   <rect x="44" y="36" width="1712" height="1010" rx="22" fill="none" stroke="#222" stroke-width="1.6" stroke-dasharray="3 6" />
 
   <text x="78" y="82" class="title">Floppy 后端架构（当前仓库实现）</text>
-  <text x="78" y="116" class="subtitle">FastAPI 执行层 + LangGraph 决策层 + 音频资产库 + MiniMax/本地 Provider；虚线标注生产替换点。</text>
+  <text x="78" y="116" class="subtitle">FastAPI 执行层 + Hermes 决策层 + 音频资产库 + MiniMax/本地 Provider；LangGraph 仅作本地 fallback。</text>
 
   <!-- Clients -->
   <rect x="82" y="170" width="230" height="270" class="box blue" />
@@ -65,8 +65,8 @@
 
   <!-- Agent Layer -->
   <rect x="760" y="145" width="430" height="385" class="box yellow" />
-  <text x="785" y="182" class="panel-title">Agent 决策层</text>
-  <text x="785" y="210" class="code">services/agent_graph.py</text>
+  <text x="785" y="182" class="panel-title">Agent Runtime 决策层</text>
+  <text x="785" y="210" class="code">agent_runtime.py / hermes_agent.py</text>
 
   <rect x="800" y="245" width="155" height="50" class="box white" />
   <text x="822" y="267" class="small">加载画像</text>
@@ -77,8 +77,8 @@
   <text x="1017" y="286" class="tiny">cache_key</text>
 
   <rect x="800" y="325" width="155" height="58" class="box white" />
-  <text x="816" y="349" class="small">Query Planner</text>
-  <text x="813" y="369" class="tiny">rule / ai fallback</text>
+  <text x="816" y="349" class="small">Hermes Agent</text>
+  <text x="805" y="369" class="tiny">OpenAI-compatible API</text>
 
   <rect x="995" y="325" width="155" height="58" class="box white" />
   <text x="1020" y="349" class="small">资产检索</text>
@@ -86,7 +86,7 @@
 
   <rect x="800" y="420" width="350" height="66" class="box white" />
   <text x="828" y="446" class="label">路由决策</text>
-  <text x="828" y="470" class="tiny">play_asset / no_match / generate_job</text>
+  <text x="828" y="470" class="tiny">play_asset / no_match / generate_job / remix_current</text>
 
   <!-- Services -->
   <rect x="760" y="575" width="430" height="305" class="box green" />

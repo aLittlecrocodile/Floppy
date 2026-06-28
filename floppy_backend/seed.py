@@ -41,7 +41,7 @@ def seed_assets(repository: Repository, storage: LocalFileStorage, *, max_durati
         voice_style = item.get("voice_style") or normalized.voice_style
 
         # Real audio file already imported under storage (real/...). Register it
-        # directly so agent_graph can match it and remix can use it as a layer.
+        # directly so agent_runtime can match it and remix can use it as a layer.
         object_key = item["object_key"]
         path = storage.path_for(object_key)
         if not path.exists():
@@ -73,5 +73,3 @@ def seed_assets(repository: Repository, storage: LocalFileStorage, *, max_durati
         )
         created += 1
     return created
-    return created
-

@@ -192,9 +192,9 @@ GET /generation-jobs/{job_id}
 [FastAPI Demo API]
       |
       v
-[LangGraph Agent 决策图]
+[Hermes Agent Runtime]
       |
-      +--> [AI Query Planner: DeepSeek-V4-Flash]
+      +--> [本地资产检索上下文]
       |          |
       |          v
       |    StructuredQuery: tags / mood / confidence
@@ -270,4 +270,3 @@ TBD：
 - 增加“用户画像”侧栏。
 - 增加生成历史列表。
 - 增加反馈按钮：喜欢 / 不喜欢 / 太短 / 没有背景声。
-

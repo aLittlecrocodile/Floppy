@@ -86,14 +86,24 @@ def test_remix_session_smoke(tmp_path, monkeypatch):
     _configure_tmp_app(monkeypatch, tmp_path)
 
     with TestClient(app) as client:
-        assert client.post("/admin/seed").status_code == 200
-        assets = state.repository.list_assets(limit=20)
-        foreground = next((asset for asset in assets if asset.type != AudioType.WHITE_NOISE), assets[0])
+        assert client.put("/users/u_remix_smoke/profile", json=_profile_payload()).status_code == 200
+        generated = client.post(
+            "/users/u_remix_smoke/generation-jobs",
+            json={
+                "request_text": "请生成一段温柔女声的短呼吸冥想",
+                "force_generate": True,
+            },
+        )
+        assert generated.status_code == 202
+        job_id = generated.json()["job_id"]
+        job = client.get(f"/generation-jobs/{job_id}")
+        assert job.status_code == 200
+        foreground_id = job.json()["asset"]["id"]
 
         created = client.post(
             "/remix/sessions",
             json={
-                "foreground_asset_id": foreground.id,
+                "foreground_asset_id": foreground_id,
                 "intent": "add_background",
                 "sound_type": "rain",
                 "mix_params": {"background_volume": 0.25},

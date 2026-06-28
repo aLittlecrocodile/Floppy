@@ -12,35 +12,35 @@
 | 6 | mood 字段透传 | request_text 含情绪关键词（焦虑/放松） | 响应 `normalized_request.mood` 非空数组，或 `structured_query.mood` 存在 |
 | 7 | asset tag 兜底 | 资产仅有 mood_tags + user_segment_tags | hit 场景仍可命中，不因缺少扩展标签而 miss |
 
-## P0 LangGraph 验收项（阻塞上线）
+## P0 Hermes Runtime 验收项（阻塞上线）
 
 | # | 验收点 | 验证方式 | 通过标准 |
 |---|--------|----------|----------|
-| LG-1 | 响应字段兼容 | 断言 `/agent/decide` 200 响应包含全部必选字段 | 必含：`action`, `normalized_request`, `profile_context`, `search`, `asset`, `job_id`, `reasons` |
-| LG-2 | Graph 路由 hit | seed 资产 + 匹配请求 | `action=play_asset`, asset 非空, 无 job 创建 |
-| LG-3 | Graph 路由 no_match | `generation_allowed=false` + miss | `action=no_match` |
-| LG-4 | Graph 路由 generate_job | `generation_allowed=true` + miss | `action=generate_job`, job_id 非空 |
-| LG-5 | Graph 路由 budget | `FLOPPY_DAILY_GENERATE_COUNT=0` | HTTP 429 |
-| LG-6 | Provider 封装 | 代码检查 + 测试 | MiniMax/provider 调用仅通过 `GenerationService`，graph node 不直接实例化 provider |
-| LG-7 | 默认 pytest 隔离 | 无 FLOPPY_MINIMAX_API_KEY 环境下全量 pytest | 不实例化 MiniMaxTTSProvider |
-| LG-8 | Graph 确定性可测 | 单元测试 mock 所有外部依赖 | graph runner 输入固定 → 输出固定，无随机/时间依赖 |
+| HR-1 | 响应字段兼容 | 断言 `/agent/decide` 200 响应包含全部必选字段 | 必含：`action`, `normalized_request`, `profile_context`, `search`, `asset`, `job_id`, `reasons`, `selected_skill`, `tool_calls` |
+| HR-2 | Hermes 主路径 | mock Hermes decision | `planner_meta.planner_source=hermes`，首个 tool call 为 `hermes_agent` |
+| HR-3 | Hermes hit | Hermes 返回候选 asset_id | `action=play_asset`, asset 非空, 无 job 创建 |
+| HR-4 | Hermes no_match | `generation_allowed=false` 且 Hermes/no candidate 不生成 | `action=no_match` |
+| HR-5 | Hermes generate_job | Hermes 返回 `generate_job` | `action=generate_job`, job_id 非空，directive 可透传 |
+| HR-6 | Hermes remix | `current_asset_id` 存在且 Hermes 返回 `remix_current` | `action=remix_current`, remix_job_id 非空 |
+| HR-7 | Provider 封装 | 代码检查 + 测试 | MiniMax/provider 调用仅通过 `GenerationService`，Hermes runtime 不直接实例化 provider |
+| HR-8 | 默认 pytest 隔离 | 无 FLOPPY_MINIMAX_API_KEY 环境下全量 pytest | 不实例化 MiniMaxTTSProvider；测试环境显式使用 local runtime |
 
 ### 已知限制（不阻塞 P0）
 
-- **SQLite checkpointer 未接入**：P0 graph 无状态持久化；重启后无法恢复中间态。P1 接入。
-- **Graph 重试/fallback**：P0 不要求 node 级重试；provider 失败直接返回 failed job。
+- **Hermes MCP 直调未启用**：当前阶段 Hermes 负责决策，Floppy 仍在本地执行 workflow。
+- **Local LangGraph fallback 可选**：仅在 `FLOPPY_AGENT_RUNTIME=local` 或 `FLOPPY_HERMES_FALLBACK_TO_LOCAL=true` 时构建。
 
-## P0 AI Query Planner 验收项（阻塞上线）
+## Local Query Planner 验收项（local runtime / fallback）
 
 | # | 验收点 | 验证方式 | 通过标准 |
 |---|--------|----------|----------|
 | AQP-1 | 默认 pytest 不访问真实 AI/外部 API | 无 AI provider key 环境下全量 pytest | 通过，无网络调用；AI planner 必须可 mock/stub |
-| AQP-2 | Mock AI planner → tag 命中 | mock planner 返回 `preferred_tags=["grounding"]` | `/agent/decide` 按 AI tags 命中资产，action=play_asset |
-| AQP-3 | AI planner 是主路径，规则仅 fallback | 代码检查 agent_graph search node | 主路径调用 AI planner；segment_map 仅在 planner unavailable/low-confidence 时使用 |
+| AQP-2 | Mock AI planner → tag 命中 | `FLOPPY_AGENT_RUNTIME=local`，mock planner 返回 `preferred_tags=["grounding"]` | `/agent/decide` 按 AI tags 命中资产，action=play_asset |
+| AQP-3 | Hermes 主路径不依赖 Query Planner | 代码检查 runtime factory | `FLOPPY_AGENT_RUNTIME=hermes` 且无 local fallback 时不构建 `agent_graph` |
 | AQP-4 | AI low confidence / unavailable → fallback | mock planner raise/返回 confidence<阈值 | fallback 到规则标签，reasons 含 "fallback" 字样 |
 | AQP-5 | Fallback 不绕过预算/429 | fallback + `FLOPPY_DAILY_GENERATE_COUNT=0` | 仍返回 429，生成仍走 GenerationService |
 | AQP-6 | 响应字段兼容 | 断言 200 响应字段 | 必含：action/normalized_request/profile_context/search/asset/job_id/reasons |
-| AQP-7 | AI provider key 不入库不进日志 | grep 代码 + pytest 输出 | 无 hardcoded key；测试日志无 key 泄漏；env var 命名 `FLOPPY_AI_PLANNER_*` |
+| AQP-7 | AI provider key 不入库不进日志 | grep 代码 + pytest 输出 | 无 hardcoded key；测试日志无 key 泄漏；env var 命名 `FLOPPY_QUERY_PLANNER_*` |
 
 ### AI Planner 已知限制（不阻塞 P0）
 

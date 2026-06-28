@@ -24,7 +24,7 @@ from floppy_backend.models import (
     ProfileContext,
 )
 from floppy_backend.repositories import Repository
-from floppy_backend.services.agent_graph import AgentGraphBuilder
+from floppy_backend.services.agent_runtime import AgentRuntime
 from floppy_backend.services.generation import GenerationService
 from floppy_backend.services.normalizer import RequestNormalizer
 from floppy_backend.services.recommendation import RecommendationService
@@ -127,7 +127,7 @@ class HermesAgentRuntime:
         generation_service: GenerationService,
         remix_service: RemixService,
         settings: Settings,
-        local_agent: AgentGraphBuilder,
+        local_agent: AgentRuntime | None,
     ):
         self._repo = repository
         self._storage = storage
@@ -162,7 +162,7 @@ class HermesAgentRuntime:
                 hermes_latency_ms=latency_ms,
             )
         except Exception as exc:
-            if not self._settings.hermes_fallback_to_local:
+            if not self._settings.hermes_fallback_to_local or self._local_agent is None:
                 raise
             return self._fallback(request, exc, int((time.perf_counter() - started) * 1000))
 
@@ -330,6 +330,8 @@ class HermesAgentRuntime:
         )
 
     def _fallback(self, request: AgentDecideRequest, exc: Exception, latency_ms: int) -> AgentDecideResponse:
+        if self._local_agent is None:
+            raise RuntimeError("Hermes fallback requested but local agent is unavailable") from exc
         response = self._local_agent.run(request)
         meta = response.planner_meta or PlannerMeta()
         return response.model_copy(

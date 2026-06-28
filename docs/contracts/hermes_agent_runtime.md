@@ -17,19 +17,25 @@ This avoids binding product workflow state to Hermes internals while replacing t
 
 ## Runtime Switch
 
-Default local runtime:
-
-```bash
-FLOPPY_AGENT_RUNTIME=local
-```
-
-Hermes runtime:
+Default Hermes runtime:
 
 ```bash
 FLOPPY_AGENT_RUNTIME=hermes
 FLOPPY_HERMES_BASE_URL=http://127.0.0.1:8642
 FLOPPY_HERMES_API_KEY=change-me-local-dev
 FLOPPY_HERMES_MODEL=hermes-agent
+FLOPPY_HERMES_FALLBACK_TO_LOCAL=false
+```
+
+Local LangGraph fallback for development:
+
+```bash
+FLOPPY_AGENT_RUNTIME=local
+```
+
+Optional Hermes-to-local fallback:
+
+```bash
 FLOPPY_HERMES_FALLBACK_TO_LOCAL=true
 ```
 

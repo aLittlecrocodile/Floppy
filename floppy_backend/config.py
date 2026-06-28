@@ -45,16 +45,15 @@ class Settings(BaseSettings):
     query_planner_timeout_sec: float = 8.0
     query_planner_max_tokens: int = 5000
 
-    # Agent runtime. "local" keeps the in-process LangGraph router.
-    # "hermes" delegates planning to a running Hermes Agent API server and
-    # executes the selected Floppy workflow locally.
-    agent_runtime: str = "local"  # "local" | "hermes"
+    # Agent runtime. Hermes is the primary decision runtime; "local" keeps the
+    # in-process LangGraph router for dev fallback and comparison.
+    agent_runtime: str = "hermes"  # "hermes" | "local"
     hermes_base_url: str = "http://127.0.0.1:8642"
     hermes_api_key: str | None = None
     hermes_model: str = "hermes-agent"
     hermes_timeout_sec: float = 30.0
     hermes_store_conversation: bool = True
-    hermes_fallback_to_local: bool = True
+    hermes_fallback_to_local: bool = False
 
     # Directive planner + LLM script writer (agent "thinks first" before
     # commanding the generation workflow). Reuses query_planner_* creds unless

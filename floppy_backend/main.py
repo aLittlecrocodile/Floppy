@@ -65,11 +65,10 @@ from floppy_backend.services.generation import BudgetExceededError, GenerationSe
 from floppy_backend.services.assets import is_placeholder_created_by
 from floppy_backend.services.normalizer import RequestNormalizer
 from floppy_backend.services.profile import ProfileService
-from floppy_backend.services.query_planner import build_query_planner
 from floppy_backend.services.recommendation import RecommendationService
 from floppy_backend.services.remix import RemixService
 from floppy_backend.services.script import SleepScriptService
-from floppy_backend.services.agent_graph import AgentGraphBuilder
+from floppy_backend.services.agent_runtime import AgentRuntime, AgentRuntimeDeps, build_agent_runtime
 from floppy_backend.services.audio_page import (
     asset_to_audio_item,
     category_for,
@@ -85,8 +84,8 @@ class AppState:
     recommendation_service: RecommendationService
     generation_service: GenerationService
     remix_service: RemixService
-    agent_graph: AgentGraphBuilder
-    agent_runtime: object
+    agent_graph: AgentRuntime | None
+    agent_runtime: AgentRuntime
 
 
 state = AppState()
@@ -173,29 +172,8 @@ async def lifespan(app: FastAPI):
         settings=settings,
     )
     state.remix_service = RemixService(repository, storage)
-    state.agent_graph = AgentGraphBuilder(
-        repository=repository,
-        storage=storage,
-        normalizer=state.generation_service.normalizer,
-        recommendation_service=recommendation_service,
-        generation_service=state.generation_service,
-        settings=settings,
-        query_planner=build_query_planner(
-            settings.query_planner,
-            api_key=settings.query_planner_api_key,
-            base_url=settings.query_planner_base_url,
-            model=settings.query_planner_model,
-            timeout_sec=settings.query_planner_timeout_sec,
-            max_tokens=settings.query_planner_max_tokens,
-        ),
-        remix_service=state.remix_service,
-        directive_planner=directive_planner,
-    )
-    if settings.agent_runtime == "local":
-        state.agent_runtime = state.agent_graph
-    elif settings.agent_runtime == "hermes":
-        from floppy_backend.services.hermes_agent import HermesAgentRuntime
-        state.agent_runtime = HermesAgentRuntime(
+    agent_runtime = build_agent_runtime(
+        AgentRuntimeDeps(
             repository=repository,
             storage=storage,
             normalizer=state.generation_service.normalizer,
@@ -203,10 +181,11 @@ async def lifespan(app: FastAPI):
             generation_service=state.generation_service,
             remix_service=state.remix_service,
             settings=settings,
-            local_agent=state.agent_graph,
+            directive_planner=directive_planner,
         )
-    else:
-        raise RuntimeError(f"unsupported FLOPPY_AGENT_RUNTIME={settings.agent_runtime!r}")
+    )
+    state.agent_graph = agent_runtime.local_agent
+    state.agent_runtime = agent_runtime.runtime
     # Seed the catalog once at startup (idempotent) so voice/demo requests
     # don't pay the ~60s seeding cost on their first call.
     try:
@@ -419,7 +398,7 @@ async def speech_stream(websocket: WebSocket):
 def _ensure_demo_profile(user_id: str) -> None:
     """Make sure a user has a profile (catalog is seeded at startup).
 
-    Voice dialog and /demo/chat both need a profile for agent_graph to run;
+    Voice dialog and /demo/chat both need a profile for agent_runtime to run;
     new ad-hoc users (e.g. a browser session) get a sensible sleep default.
     """
     if state.repository.get_profile(user_id) is None:
@@ -439,7 +418,7 @@ def _ensure_demo_profile(user_id: str) -> None:
 
 
 def _resolve_audio_asset(user_id: str, request_text: str) -> dict | None:
-    """Run agent_graph to match/generate a playable sleep-audio asset.
+    """Run agent_runtime to match/generate a playable sleep-audio asset.
 
     Returns {"url", "title", "audio_type"} or None. Mirrors /demo/chat's
     play_asset / generate_job handling. Runs synchronously (call via
@@ -492,7 +471,7 @@ async def voice_ws(websocket: WebSocket):
     from floppy_backend.services.dialog_llm import DialogLLM
     from floppy_backend.services.voice_session import EVENT_AUDIO, OutboundEvent, VoiceSession
 
-    # Resolve a sleep-audio asset via agent_graph (off the event loop).
+    # Resolve a sleep-audio asset via agent_runtime (off the event loop).
     resolve_user_id = user_id or "voice_demo_user"
     await asyncio.to_thread(_ensure_demo_profile, resolve_user_id)
 

@@ -17,7 +17,21 @@
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -e ".[dev]"
+```
+
+默认 Agent runtime 是 Hermes，需要先启动 Hermes Agent API Server：
+
+```bash
+export FLOPPY_AGENT_RUNTIME=hermes
+export FLOPPY_HERMES_BASE_URL=http://127.0.0.1:8642
+export FLOPPY_HERMES_API_KEY=change-me-local-dev
 uvicorn floppy_backend.main:app --reload
+```
+
+如果只想本地开发、不依赖 Hermes，可显式切回 LangGraph fallback：
+
+```bash
+FLOPPY_AGENT_RUNTIME=local uvicorn floppy_backend.main:app --reload
 ```
 
 健康检查：
@@ -153,6 +167,9 @@ export FLOPPY_MINIMAX_ENABLE_MUSIC_MIX=true
 - `floppy_backend.services.recommendation`：推荐召回和排序。
 - `floppy_backend.services.generation`：缓存命中、生成任务、入库。
 - `floppy_backend.services.script`：睡前脚本生成、停顿标记和脚本 hash。
+- `floppy_backend.services.agent_runtime`：Agent runtime 统一入口，默认装配 Hermes。
+- `floppy_backend.services.hermes_agent`：Hermes 决策适配器，Floppy 本地执行 workflow。
+- `floppy_backend.services.agent_graph`：可选本地 LangGraph fallback。
 - `floppy_backend.providers.audio`：音频生成 provider 抽象。
 
 真实生产替换点：
