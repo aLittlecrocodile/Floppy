@@ -103,6 +103,8 @@ class HermesAgentClient:
                 "instructions": _HERMES_DECISION_INSTRUCTIONS,
                 "store": self._store,
                 "conversation": f"floppy-agent:{request.user_id}",
+                "tools": [],
+                "tool_choice": "none",
             },
             timeout=self._timeout,
         )

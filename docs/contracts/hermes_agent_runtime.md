@@ -23,7 +23,7 @@ Default Hermes runtime:
 FLOPPY_AGENT_RUNTIME=hermes
 FLOPPY_HERMES_BASE_URL=http://127.0.0.1:8642
 FLOPPY_HERMES_API_KEY=change-me-local-dev
-FLOPPY_HERMES_MODEL=hermes-agent
+FLOPPY_HERMES_MODEL=DeepSeek-V4-Flash
 FLOPPY_HERMES_FALLBACK_TO_LOCAL=false
 ```
 

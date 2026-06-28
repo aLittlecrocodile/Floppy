@@ -50,7 +50,7 @@ class Settings(BaseSettings):
     agent_runtime: str = "hermes"  # "hermes" | "local"
     hermes_base_url: str = "http://127.0.0.1:8642"
     hermes_api_key: str | None = None
-    hermes_model: str = "hermes-agent"
+    hermes_model: str = "DeepSeek-V4-Flash"
     hermes_timeout_sec: float = 30.0
     hermes_store_conversation: bool = True
     hermes_fallback_to_local: bool = False

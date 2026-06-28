@@ -1,7 +1,16 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 from floppy_backend.config import Settings
-from floppy_backend.models import AgentDecideRequest, GenerationDirective, AudioType
+from floppy_backend.models import (
+    AgentDecideRequest,
+    AssetSearchResponse,
+    AudioType,
+    GenerationBudget,
+    GenerationDirective,
+    ProfileContext,
+)
 from floppy_backend.services import agent_runtime
 from floppy_backend.services.agent_runtime import AgentRuntimeDeps, build_agent_runtime
 
@@ -58,6 +67,75 @@ def test_hermes_with_fallback_builds_local_agent(monkeypatch):
 
     assert built.local_agent is local_agent
     assert built.runtime.__class__.__name__ == "HermesAgentRuntime"
+
+
+def test_hermes_client_disables_gateway_tools(monkeypatch):
+    from floppy_backend.services.hermes_agent import HermesAgentClient
+
+    captured = {}
+
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                "output": [
+                    {
+                        "type": "message",
+                        "content": [
+                            {
+                                "type": "output_text",
+                                "text": (
+                                    '{"action":"generate_job",'
+                                    '"selected_skill":"generate_sleep_audio",'
+                                    '"reasons":["测试"],"confidence":0.8}'
+                                ),
+                            }
+                        ],
+                    }
+                ]
+            }
+
+    def fake_post(url, *, headers, json, timeout):
+        captured["url"] = url
+        captured["json"] = json
+        return FakeResponse()
+
+    monkeypatch.setattr("floppy_backend.services.hermes_agent.httpx.post", fake_post)
+    client = HermesAgentClient(
+        Settings(
+            hermes_base_url="http://127.0.0.1:8642",
+            hermes_api_key="test-key",
+            hermes_model="DeepSeek-V4-Flash",
+        )
+    )
+
+    decision = client.decide(
+        request=AgentDecideRequest(
+            user_id="u_hermes",
+            request_text="来一段雨声呼吸冥想",
+        ),
+        profile_context=ProfileContext(
+            user_id="u_hermes",
+            segment="anxiety_relief",
+            updated_at=datetime.now(timezone.utc),
+            audio_type_preferences=[AudioType.MEDITATION],
+            voice_preferences=["warm_female"],
+            background_preferences=["rain_soft"],
+            mood_tags=["anxiety_relief"],
+            generation_budget=GenerationBudget(
+                daily_remaining_chars=1000,
+                daily_generate_count_remaining=3,
+            ),
+        ),
+        search=AssetSearchResponse(results=[], hit=False, best_score=None, threshold=0.58),
+    )
+
+    assert captured["json"]["model"] == "DeepSeek-V4-Flash"
+    assert captured["json"]["tools"] == []
+    assert captured["json"]["tool_choice"] == "none"
+    assert decision.action == "generate_job"
 
 
 def test_agent_decide_can_run_on_hermes_without_local_graph(tmp_path, monkeypatch):
