@@ -8,7 +8,7 @@ SKILL_DIR = ROOT / "hermes" / "skills" / "floppy"
 def test_floppy_hermes_skill_docs_exist_and_name_core_tools():
     skills = {
         "floppy-sleep-audio": ["mcp_floppy_search_audio_assets", "mcp_floppy_generate_sleep_audio"],
-        "floppy-voice-dialog": ["audio_workflow", "remix_current"],
+        "floppy-voice-dialog": ["audio_workflow", "remix_current", "stop_audio"],
         "floppy-profile-context": ["mcp_floppy_get_user_profile_context", "mcp_floppy_update_profile_checkin"],
         "floppy-playback-control": ["mcp_floppy_start_playback", "mcp_floppy_get_active_playback"],
         "floppy-content-transform": ["mcp_floppy_generate_audio_from_upload", "podcast_digest"],

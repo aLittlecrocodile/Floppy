@@ -568,7 +568,7 @@ class VoiceIntentResponse(BaseModel):
     reply: str
     audio_url: str | None = None
     asset: AudioItem | None = None
-    action: str  # chat | clarify | play_asset | generate_job | remix_current | no_match | superseded
+    action: str  # chat | clarify | play_asset | generate_job | remix_current | stop_audio | no_match | superseded
     audio_type: str | None = None
     job_id: str | None = None
     job_status: str | None = None

@@ -27,8 +27,11 @@ EVENT_SESSION_STARTED = "session_started"
 EVENT_USER_TEXT = "user_text"          # ASR result (partial/final)
 EVENT_ASSISTANT_TEXT = "assistant_text"  # LLM sentence about to be spoken
 EVENT_AUDIO = "audio"                  # TTS audio bytes
+EVENT_SPEECH_END = "speech_end"        # spoken guidance audio is ready to play
+EVENT_AUDIO_LOOKUP = "audio_lookup"    # started searching/generating sleep audio
 EVENT_AUDIO_ASSET = "audio_asset"      # a sleep-audio asset to play (url + meta)
 EVENT_AUDIO_JOB = "audio_job"          # a sleep-audio generation job to poll
+EVENT_STOP_AUDIO = "stop_audio"        # stop the currently playing sleep-audio asset
 EVENT_TURN_END = "turn_end"            # assistant finished a turn
 EVENT_ERROR = "error"
 
@@ -65,6 +68,8 @@ class OutboundEvent:
             "is_final": self.is_final,
             "created_at": self.created_at,
         }
+        if self.type == EVENT_AUDIO_LOOKUP:
+            payload["audio_type"] = self.audio_type
         if self.type == EVENT_AUDIO_ASSET:
             payload["url"] = self.url
             payload["audio_type"] = self.audio_type
@@ -215,9 +220,16 @@ class VoiceSession:
         # Commit the turn to history once fully spoken (not on barge-in cancel).
         self.history.append(DialogTurn(role="user", content=user_text))
         self.history.append(DialogTurn(role="assistant", content="".join(spoken)))
+        await emit(self._event(EVENT_SPEECH_END, is_final=True, turn_id=turn_id))
 
         # Resolve and push a sleep-audio asset if the LLM signalled one.
         if detected["audio_type"] and self.audio_resolver is not None:
+            await emit(self._event(
+                EVENT_AUDIO_LOOKUP,
+                text="正在查找合适的助眠音频，如果本地没有合适的会实时生成。",
+                audio_type=detected["audio_type"],
+                turn_id=turn_id,
+            ))
             try:
                 asset = await self.audio_resolver(user_text, detected["audio_type"], self.current_asset_id)
             except Exception:  # noqa: BLE001 — resolution failure shouldn't break the turn
@@ -254,6 +266,10 @@ class VoiceSession:
         action = route.normalized_action()
         reply_text = route.response_text()
 
+        if action == "stop_audio":
+            self.current_asset_id = None
+            await emit(self._event(EVENT_STOP_AUDIO, is_final=True, turn_id=turn_id))
+
         async def _reply_iter() -> AsyncIterator[str]:
             yield reply_text
 
@@ -263,10 +279,17 @@ class VoiceSession:
 
         self.history.append(DialogTurn(role="user", content=user_text))
         self.history.append(DialogTurn(role="assistant", content=reply_text))
+        await emit(self._event(EVENT_SPEECH_END, is_final=True, turn_id=turn_id))
 
         if action in {"audio_workflow", "remix_current"} and self.audio_resolver is not None:
             audio_type = route.audio_intent_hint or "unknown"
             request_text = route.audio_text(user_text)
+            await emit(self._event(
+                EVENT_AUDIO_LOOKUP,
+                text="正在查找合适的助眠音频，如果本地没有合适的会实时生成。",
+                audio_type=audio_type,
+                turn_id=turn_id,
+            ))
             try:
                 asset = await self.audio_resolver(request_text, audio_type, self.current_asset_id)
             except Exception:  # noqa: BLE001 — resolution failure shouldn't break the turn

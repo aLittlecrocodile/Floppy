@@ -1,6 +1,6 @@
 ---
 name: floppy-voice-dialog
-description: Route Floppy ASR-finalized voice utterances into chat, clarification, sleep-audio workflow, remix, or no-match.
+description: Route Floppy ASR-finalized voice utterances into chat, clarification, sleep-audio workflow, playback stop, remix, or no-match.
 version: 0.1.0
 metadata:
   hermes:
@@ -16,7 +16,7 @@ Use this skill for ASR-finalized home-screen or realtime voice utterances before
 any audio search/generation workflow runs.
 
 The skill decides whether the user is chatting, needs a clarification, clearly
-wants sleep audio, wants to edit the current playback, or cannot be handled.
+wants sleep audio, wants to stop/edit the current playback, or cannot be handled.
 
 ## Design Rule
 
@@ -63,6 +63,8 @@ Allowed `action` values:
   `audio_request_text` to `floppy-sleep-audio`.
 - `remix_current`: the user wants to edit the current playback. Requires
   `current_asset_id`; otherwise choose `clarify`.
+- `stop_audio`: the user wants to stop/pause/turn off the current playback.
+  This is a playback control action; do not search, generate, or remix audio.
 - `no_match`: unsupported, unsafe, or not actionable.
 
 Allowed `audio_intent_hint` values:
@@ -115,11 +117,20 @@ Choose `remix_current` when the user wants to change current playback:
 If `current_asset_id` is missing, ask a clarification instead of pretending to
 edit playback.
 
+Choose `stop_audio` when the user wants playback to stop:
+
+- 停一下
+- 停止音乐
+- 先别放了
+- 暂停播放
+- 关掉这个声音
+
 ## Pitfalls
 
 - Do not play audio for vague emotional statements.
 - Do not answer “好的我给你播放” unless action is `audio_workflow` or
   `remix_current`.
+- Do not treat “停止音乐/先别放了” as remix or a new recommendation request.
 - Do not call catalog, generation, or remix tools directly from this skill.
 - Do not convert “我想放松一下” into music automatically. Ask first unless the
   dialog history clearly resolves the user's preference.
@@ -133,4 +144,5 @@ The final route must be one of:
 - `clarify` with a short question,
 - `audio_workflow` with `audio_request_text`,
 - `remix_current` with `audio_request_text`,
+- `stop_audio` with no audio request,
 - or `no_match` with a safe explanation.

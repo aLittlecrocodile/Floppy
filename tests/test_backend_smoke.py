@@ -178,6 +178,45 @@ def test_voice_intent_chat_route_does_not_run_audio_workflow(tmp_path, monkeypat
     assert body["reply"] == "听起来你今晚有点累，我们先慢慢聊一会儿。"
 
 
+def test_voice_intent_stop_audio_does_not_run_audio_workflow(tmp_path, monkeypatch):
+    _configure_tmp_app(monkeypatch, tmp_path)
+
+    def fake_route(self, *, user_id, conversation_id, text, history, source="voice", current_asset_id=None):
+        from floppy_backend.services.voice_dialog_router import VoiceDialogRoute
+
+        return VoiceDialogRoute(
+            action="stop_audio",
+            reply_text="好的，先帮你停掉。",
+            confidence=0.98,
+            reasons=["用户要求停止播放"],
+        )
+
+    def fail_run_chat_decision(*args, **kwargs):
+        raise AssertionError("voice stop route should not run audio workflow")
+
+    monkeypatch.setattr("floppy_backend.services.voice_dialog_router.HermesVoiceDialogClient.route", fake_route)
+    monkeypatch.setattr("floppy_backend.main._run_chat_decision", fail_run_chat_decision)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/voice/intent",
+            json={
+                "text": "停止音乐",
+                "conversationId": "voice-stop-route",
+                "clientRequestId": "req-stop",
+                "turnIndex": 1,
+                "user_id": "u_voice_stop",
+                "current_asset_id": "aud_playing",
+            },
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["action"] == "stop_audio"
+    assert body["audio_url"] is None
+    assert body["reply"] == "好的，先帮你停掉。"
+
+
 def test_voice_intent_audio_route_enters_sleep_audio_workflow(tmp_path, monkeypatch):
     _configure_tmp_app(monkeypatch, tmp_path)
     captured = {}

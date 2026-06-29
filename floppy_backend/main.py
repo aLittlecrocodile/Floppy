@@ -456,7 +456,7 @@ def _resolve_audio_asset(user_id: str, request_text: str, current_asset_id: str 
         return {
             "job_id": response.job_id,
             "job_status": job.status if job else "queued",
-            "title": "正在生成助眠音频",
+            "title": "专属助眠音频",
             "audio_type": response.normalized_request.intent.value,
         }
     return None
@@ -821,7 +821,7 @@ def voice_intent(payload: VoiceIntentIn, background_tasks: BackgroundTasks):
             reasons=["已被更新的语音请求取代"],
         )
 
-    if route_action in {"chat", "clarify", "no_match"}:
+    if route_action in {"chat", "clarify", "stop_audio", "no_match"}:
         return VoiceIntentResponse(
             conversationId=payload.conversationId,
             clientRequestId=payload.clientRequestId,

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
 
 import httpx
@@ -10,7 +11,10 @@ from floppy_backend.config import Settings
 from floppy_backend.services.hermes_agent import _extract_json_object, _local_hermes_api_key, _responses_output_text
 
 
-_ACTIONS = {"chat", "clarify", "audio_workflow", "remix_current", "no_match"}
+_ACTIONS = {"chat", "clarify", "audio_workflow", "remix_current", "stop_audio", "no_match"}
+_STOP_AUDIO_RE = re.compile(
+    r"(停一下|停下|停止|暂停|停掉|关掉|别放了?|别播了?|不要放了?|不听了|够了|静音|安静一点)"
+)
 
 
 class VoiceDialogRoute(BaseModel):
@@ -59,6 +63,14 @@ class HermesVoiceDialogClient:
         source: str = "voice",
         current_asset_id: str | None = None,
     ) -> VoiceDialogRoute:
+        if _STOP_AUDIO_RE.search(text):
+            return VoiceDialogRoute(
+                action="stop_audio",
+                reply_text="好的，先帮你停掉。",
+                confidence=0.98,
+                reasons=["用户明确要求停止当前播放"],
+            )
+
         prompt = json.dumps(
             {
                 "user_id": user_id,
@@ -114,6 +126,7 @@ _HERMES_VOICE_DIALOG_INSTRUCTIONS = """
 - 语音入口是对话优先，不是推荐入口。
 - 用户表达模糊、倾诉、打招呼、说睡不着或想放松时，先 chat 或 clarify，不要直接进入音频 workflow。
 - 用户明确要求播放/来一段/想听某类音频时，才进入 audio_workflow。
+- 用户要求停止、暂停、别放了、关掉音乐时，选择 stop_audio；这是播放控制，不进入音频 workflow。
 - 用户想改当前播放内容，比如换一个、加雨声、小声点、不要这个，且有 current_asset_id 时，选择 remix_current；没有 current_asset_id 时选择 clarify。
 - audio_workflow 只负责把明确音频请求交给 floppy-sleep-audio Skill；你不要自己调用资源工具。
 
@@ -122,6 +135,7 @@ _HERMES_VOICE_DIALOG_INSTRUCTIONS = """
 - clarify：需求模糊，需要追问。比如“我想放松一点”可以问想听雨声、钢琴还是呼吸引导。
 - audio_workflow：明确要音频。填写 audio_request_text，保留用户硬约束。
 - remix_current：明确修改当前音频。填写 audio_request_text，保留修改目标。
+- stop_audio：停止当前正在播放的助眠音频，不搜索、不生成、不 remix。
 - no_match：不适合处理或不安全。
 
 audio_intent_hint 只能是：
@@ -133,12 +147,13 @@ white_noise | music | meditation | story | asmr | podcast_digest | null
 - “放点雨声”“我想听钢琴”“来个睡前故事” -> audio_workflow。
 - “不要人声的雨声”“白噪音不要雷声” -> audio_workflow，并把这些硬约束写进 audio_request_text。
 - “换一个”“加点雨声”“小声一点” -> 有 current_asset_id 则 remix_current，否则 clarify。
+- “停一下”“停止音乐”“先别放了”“暂停播放” -> stop_audio。
 
-reply_text 要是给用户听的一句话，温柔、简短、口语化。audio_workflow 时可以说“好的，我给你找一段……”；chat/clarify 时不要承诺已经播放。
+reply_text 要是给用户听的一句话，温柔、简短、口语化。audio_workflow 时可以说“好的，我先帮你找；没有合适的我会实时生成。”；chat/clarify 时不要承诺已经播放。
 
 只输出 JSON，不要 Markdown：
 {
-  "action": "chat|clarify|audio_workflow|remix_current|no_match",
+  "action": "chat|clarify|audio_workflow|remix_current|stop_audio|no_match",
   "reply_text": "给用户听的一句话",
   "audio_request_text": null,
   "audio_intent_hint": null,

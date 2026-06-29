@@ -17,7 +17,10 @@ from floppy_backend.services.voice_session import (
     EVENT_AUDIO,
     EVENT_AUDIO_ASSET,
     EVENT_AUDIO_JOB,
+    EVENT_AUDIO_LOOKUP,
     EVENT_SESSION_STARTED,
+    EVENT_SPEECH_END,
+    EVENT_STOP_AUDIO,
     EVENT_TURN_END,
     EVENT_USER_TEXT,
     OutboundEvent,
@@ -257,10 +260,12 @@ def test_dialog_router_audio_workflow_resolves_asset_after_reply():
     )
 
     events = asyncio.run(_collect(session, [b"x"]))
+    types = [e.type for e in events]
     asset_events = [e for e in events if e.type == EVENT_AUDIO_ASSET]
 
     assert router.calls == [("放点雨声", None)]
     assert resolver_calls == [("给我放雨声，不要人声", "white_noise", None)]
+    assert types.index(EVENT_SPEECH_END) < types.index(EVENT_AUDIO_LOOKUP) < types.index(EVENT_AUDIO_ASSET) < types.index(EVENT_TURN_END)
     assert len(asset_events) == 1
     assert asset_events[0].url == "http://127.0.0.1/audio/rain.mp3"
     assert asset_events[0].text == "夜雨轻敲"
@@ -324,9 +329,41 @@ def test_dialog_router_generation_job_emits_pollable_job_event():
     )
 
     events = asyncio.run(_collect(session, [b"x"]))
+    types = [e.type for e in events]
     job_events = [e for e in events if e.type == EVENT_AUDIO_JOB]
 
     assert len(job_events) == 1
+    assert types.index(EVENT_SPEECH_END) < types.index(EVENT_AUDIO_LOOKUP) < types.index(EVENT_AUDIO_JOB) < types.index(EVENT_TURN_END)
     assert job_events[0].job_id == "job_story"
     assert job_events[0].job_status == "queued"
     assert job_events[0].audio_type == "story"
+
+
+def test_dialog_router_stop_audio_emits_control_event_without_resolver():
+    asr = FakeASR([FakeASRResult("停止音乐", is_final=True)])
+    router = FakeRouter(
+        VoiceDialogRoute(
+            action="stop_audio",
+            reply_text="好的，先帮你停掉。",
+        )
+    )
+
+    async def fail_resolver(request_text: str, audio_type: str, current_asset_id: str | None):
+        raise AssertionError("stop_audio route should not resolve audio")
+
+    session = VoiceSession(
+        asr=asr,
+        tts=FakeTTS(),
+        dialog_router=router,
+        audio_resolver=fail_resolver,
+        current_asset_id="aud_playing",
+    )
+
+    events = asyncio.run(_collect(session, [b"x"]))
+    types = [e.type for e in events]
+
+    assert EVENT_STOP_AUDIO in types
+    assert EVENT_AUDIO_LOOKUP not in types
+    assert EVENT_AUDIO_ASSET not in types
+    assert types.index(EVENT_STOP_AUDIO) < types.index(EVENT_ASSISTANT_TEXT) < types.index(EVENT_TURN_END)
+    assert session.current_asset_id is None

@@ -25,6 +25,10 @@ VOICE_HTML = """<!doctype html>
   .msg.user { color: #7fb4ff; }
   .msg.assistant { color: #b7f5c8; }
   .msg .who { font-size: 11px; opacity: .6; margin-right: 6px; }
+  .progress-card { margin-top: 8px; padding: 10px; border: 1px solid #2c3a52; border-radius: 8px; background: #101827; }
+  .progress-label { color: #d9e6ff; font-size: 13px; margin-bottom: 8px; }
+  .progress-track { height: 7px; border-radius: 999px; overflow: hidden; background: #253149; }
+  .progress-fill { width: 8%; height: 100%; border-radius: inherit; background: linear-gradient(90deg, #7fb4ff, #ffd56b); transition: width .45s ease; }
   .latency { margin-top: 16px; background: #161d2b; border: 1px solid #243044; border-radius: 12px; padding: 14px; }
   .latency h2 { font-size: 13px; margin: 0 0 10px; color: #8b97a8; font-weight: 600; }
   .lat-grid { display: grid; grid-template-columns: 1fr auto auto; gap: 6px 16px; font-size: 13px; font-variant-numeric: tabular-nums; }
