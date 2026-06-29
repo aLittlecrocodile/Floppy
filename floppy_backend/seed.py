@@ -3,7 +3,7 @@ from __future__ import annotations
 from floppy_backend.catalog import AUDIO_CATALOG
 from floppy_backend.models import AudioAssetIn, AudioType
 from floppy_backend.repositories import Repository
-from floppy_backend.services.normalizer import RequestNormalizer
+from floppy_backend.services.request_defaults import RequestDefaults
 from floppy_backend.storage import LocalFileStorage
 from floppy_backend.utils import sha256_json, sha256_text, text_embedding
 from floppy_backend.models import GenerationRequest
@@ -24,7 +24,7 @@ def _embedding_for(item: dict, voice_style: str) -> list[float]:
 
 
 def seed_assets(repository: Repository, storage: LocalFileStorage, *, max_duration_sec: int | None = None) -> int:
-    normalizer = RequestNormalizer()
+    request_defaults = RequestDefaults()
     created = 0
     for item in AUDIO_CATALOG:
         # Only real audio files (white_noise/music) are seeded as assets. The
@@ -37,7 +37,7 @@ def seed_assets(repository: Repository, storage: LocalFileStorage, *, max_durati
         if not item.get("is_real"):
             continue
 
-        normalized = normalizer.normalize(GenerationRequest(request_text=item["request_text"]), profile=None)
+        normalized = request_defaults.normalize(GenerationRequest(request_text=item["request_text"]), profile=None)
         voice_style = item.get("voice_style") or normalized.voice_style
 
         # Real audio file already imported under storage (real/...). Register it

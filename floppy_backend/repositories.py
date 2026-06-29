@@ -85,7 +85,6 @@ class Repository:
             avg_sleep_latency_min=row["avg_sleep_latency_min"],
             mood_tags=loads(row["mood_tags"]),
             segment=row["segment"],
-            algo_segment=row["algo_segment"],
             tonight_mood=row["tonight_mood"],
             tonight_stress=row["tonight_stress"],
             profile_version=row["profile_version"],
@@ -626,20 +625,34 @@ class Repository:
             self.conn.commit()
         return record_id
 
-    def update_playback_feedback(self, record_id: str, *, feedback_type: str | None = None, rating: int | None = None, progress: float | None = None, morning_feedback: str | None = None, completed: bool = False) -> None:
+    def update_playback_feedback(self, record_id: str, *, user_id: str | None = None, feedback_type: str | None = None, rating: int | None = None, progress: float | None = None, morning_feedback: str | None = None, completed: bool = False) -> bool:
         now = utcnow()
+        where = "id = ?"
+        params: tuple = (record_id,)
+        if user_id is not None:
+            where = "id = ? AND user_id = ?"
+            params = (record_id, user_id)
         with self._lock:
-            self.conn.execute(
-                """UPDATE playback_history SET
+            cursor = self.conn.execute(
+                f"""UPDATE playback_history SET
                     feedback_type = COALESCE(?, feedback_type),
                     rating = COALESCE(?, rating),
                     progress = COALESCE(?, progress),
                     morning_feedback = COALESCE(?, morning_feedback),
                     completed_at = CASE WHEN ? THEN ? ELSE completed_at END
-                WHERE id = ?""",
-                (feedback_type, rating, progress, morning_feedback, completed, now.isoformat() if completed else None, record_id),
+                WHERE {where}""",
+                (
+                    feedback_type,
+                    rating,
+                    progress,
+                    morning_feedback,
+                    completed,
+                    now.isoformat() if completed else None,
+                    *params,
+                ),
             )
             self.conn.commit()
+        return cursor.rowcount > 0
 
     def list_playback_history(self, user_id: str, limit: int = 50) -> list[PlaybackRecord]:
         with self._lock:
@@ -658,10 +671,9 @@ class Repository:
 
     def behavior_signals(self, user_id: str, *, lookback: int = 200) -> dict[str, dict[str, float]]:
         """Aggregate per-asset behavioral signals from a user's playback history,
-        so recommendation can re-weight based on what the user actually did
-        (completed / skipped / disliked / favorited / rated) rather than only
-        the static profile. Read-only; used to give the agent a real memory of
-        listening behavior.
+        so future product logic can read what the user actually did
+        (completed / skipped / disliked / favorited / rated). Read-only; used
+        to give the agent a real memory of listening behavior.
 
         Returns {asset_id: {completed, skipped, disliked, favorited,
         avg_progress, max_rating, plays}}.
@@ -870,4 +882,3 @@ class Repository:
         with self._lock:
             self.conn.execute("DELETE FROM uploads WHERE id = ?", (upload_id,))
             self.conn.commit()
-

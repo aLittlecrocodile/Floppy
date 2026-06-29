@@ -3,11 +3,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from floppy_backend.config import Settings
-from floppy_backend.models import AssetSearchRequest, AudioAsset, AudioScript, EventIn, GenerationJobCreateResponse, GenerationRequest, GenerationResponse, NormalizedAudioRequest
+from floppy_backend.models import AudioAsset, AudioScript, EventIn, GenerationDirective, GenerationJobCreateResponse, GenerationRequest, GenerationResponse, NormalizedAudioRequest
 from floppy_backend.providers.audio import AudioGenerationProvider, GeneratedAudio
 from floppy_backend.repositories import Repository
-from floppy_backend.services.normalizer import RequestNormalizer
-from floppy_backend.services.recommendation import RecommendationService
+from floppy_backend.services.asset_catalog import AssetCatalogService
+from floppy_backend.services.request_defaults import RequestDefaults
 from floppy_backend.services.script import SleepScriptService
 from floppy_backend.storage import LocalFileStorage
 from floppy_backend.workflows.cache import build_sleep_audio_cache_key
@@ -21,6 +21,7 @@ class PreparedGeneration:
     cached_asset: AudioAsset | None
     match_type: str
     script: AudioScript | None = None
+    directive: GenerationDirective | None = None
 
 
 class BudgetExceededError(RuntimeError):
@@ -33,16 +34,16 @@ class GenerationService:
         repository: Repository,
         storage: LocalFileStorage,
         provider: AudioGenerationProvider,
-        normalizer: RequestNormalizer,
-        recommendation_service: RecommendationService,
+        request_defaults: RequestDefaults,
+        asset_catalog_service: AssetCatalogService,
         script_service: SleepScriptService,
         settings: Settings | None = None,
     ):
         self.repository = repository
         self.storage = storage
         self.provider = provider
-        self.normalizer = normalizer
-        self.recommendation_service = recommendation_service
+        self.request_defaults = request_defaults
+        self.asset_catalog_service = asset_catalog_service
         self.script_service = script_service
         self._settings = settings
         self.workflow_service = SleepAudioWorkflowService(
@@ -169,11 +170,13 @@ class GenerationService:
         if request.directive is None and job.directive is not None:
             request = request.model_copy(update={"directive": job.directive})
         self.repository.update_generation_job(job_id, status="generating")
-        prepared = self.prepare(user_id, request, allow_cache=False)
+        script = None
         try:
+            prepared = self.prepare(user_id, request, allow_cache=False)
+            script = prepared.script
             asset, latency_ms, generated = self.execute_generation(user_id, prepared)
         except Exception as exc:  # pragma: no cover - defensive boundary for provider failures.
-            self._mark_failed(job_id, exc, prepared.script)
+            self._mark_failed(job_id, exc, script)
             return
         self._mark_succeeded(job_id, asset, latency_ms, prepared.script, generated)
 
@@ -184,37 +187,37 @@ class GenerationService:
 
     def prepare(self, user_id: str, request: GenerationRequest, allow_cache: bool = True) -> PreparedGeneration:
         profile = self.repository.get_profile(user_id)
-        normalized = self.normalizer.normalize(request, profile)
         directive = request.directive
+        normalized = self.request_defaults.normalize(request, profile, directive)
         cache_key = self.cache_key_for(normalized, directive)
 
         if allow_cache and not request.force_generate:
-            search = self.recommendation_service.search(
-                AssetSearchRequest(
-                    user_id=user_id,
-                    query=request.request_text,
-                    cache_key=cache_key,
-                    limit=1,
-                )
-            )
-            if search.hit and search.results:
-                result = search.results[0]
-                asset = result.asset
+            asset = self.repository.get_asset_by_prompt_hash(cache_key)
+            if asset is not None and asset.type == normalized.intent:
                 asset.playback_url = self.storage.public_url(asset.object_key)
                 self.repository.record_event(
                     user_id,
                     EventIn(
-                        event_type="recommendation_served",
+                        event_type="asset_served",
                         asset_id=asset.id,
-                        payload={"match_type": result.match_type, "score": result.score, "reasons": result.reasons},
+                        payload={"match_type": "exact", "score": 1.0, "reasons": ["exact cache asset"]},
                     ),
                 )
-                return PreparedGeneration(normalized=normalized, cache_key=cache_key, cached_asset=asset, match_type=result.match_type)
+                return PreparedGeneration(normalized=normalized, cache_key=cache_key, cached_asset=asset, match_type="exact", directive=directive)
 
-        script = self.workflow_service.prepare_script(
-            user_id=user_id, normalized=normalized, profile=profile, directive=directive
+        script = None
+        if self.workflow_service.script_required(normalized):
+            script = self.workflow_service.prepare_script(
+                user_id=user_id, normalized=normalized, profile=profile, directive=directive
+            )
+        return PreparedGeneration(
+            normalized=normalized,
+            cache_key=cache_key,
+            cached_asset=None,
+            match_type="generated",
+            script=script,
+            directive=directive,
         )
-        return PreparedGeneration(normalized=normalized, cache_key=cache_key, cached_asset=None, match_type="generated", script=script)
 
     def execute_generation(self, user_id: str, prepared: PreparedGeneration) -> tuple[AudioAsset, int, GeneratedAudio]:
         profile = self.repository.get_profile(user_id)
@@ -224,6 +227,7 @@ class GenerationService:
             normalized=prepared.normalized,
             profile=profile,
             script=prepared.script,
+            directive=prepared.directive,
         )
         return result.asset, result.latency_ms, result.generated
 

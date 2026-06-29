@@ -10,7 +10,7 @@
 
 ## 0. 快速上手
 
-- 最简单的演示链路只需一个接口：`POST /demo/chat`，输入一句话，返回可播放的 `audio_url`，后端同步完成检索/生成，前端无需轮询。
+- 最简单的演示链路可用 `POST /demo/chat`：命中时直接返回可播放 `audio_url`；需要生成时返回 `job_id`，前端轮询 `GET /generation-jobs/{job_id}`。
 - 生产链路（可控、异步）建议用：`PUT /users/{user_id}/profile` → `POST /agent/decide` →（命中直接播放 / 未命中拿 `job_id` 轮询 `GET /generation-jobs/{job_id}`）→ 上报 `POST /users/{user_id}/events`。
 - 音频播放：所有返回的 `playback_url` / `audio_url` 都可直接作为 `<audio src>` 使用。
 
@@ -67,7 +67,7 @@
 
 ### POST `/demo/chat`
 
-输入一句自然语言，后端用 AI Planner 理解需求，命中缓存直接返回音频，未命中则同步生成。**前端只需调用这一个接口，无需轮询。**
+输入一句自然语言，Hermes Skill 理解需求并选择播放/生成/混音 workflow。命中资源直接返回音频，未命中且允许生成时返回生成任务。**前端只需调用这一个接口。**
 
 请求：
 
@@ -101,7 +101,7 @@
   "threshold": 0.58,
   "reasons": ["标签命中: breathing, rain", "质量评分高"],
   "planner_meta": {
-    "planner_source": "ai",
+    "planner_source": "hermes",
     "planner_confidence": 0.9,
     "planner_latency_ms": 1200,
     "fallback_reason": null
@@ -116,11 +116,11 @@
 | `asset` | object \| null | 命中或生成成功的资产 |
 | `reply_text` | string | 聊天机器人口吻的自然语言回复，供 Chat「转文字」展示。始终返回；LLM 失败时回退模板文案，不会为空 |
 | `is_placeholder` | boolean | true 表示当前是占位音频（非真实成品） |
-| `job_id` / `job_status` | string \| null | 生成路径才有；Demo 接口已同步等待完成 |
+| `job_id` / `job_status` | string \| null | 生成路径才有；前端用 `job_id` 轮询生成结果 |
 | `best_score` | number \| null | 检索最高分 |
 | `hit` | boolean | 是否命中缓存资产 |
 | `threshold` | number | 命中阈值（默认 0.58） |
-| `reasons` | string[] | 推荐/生成原因 |
+| `reasons` | string[] | 播放/生成原因 |
 | `planner_meta` | object \| null | Planner 元信息（来源/置信度/耗时/降级原因） |
 
 > 注意：`/demo/chat` 内部使用固定的 `demo_user` 画像，仅用于演示。生产请走第 4、5 节接口。
@@ -159,7 +159,7 @@
 | `avg_sleep_latency_min` | int | 0–180，默认 25 |
 | `mood_tags` | string[] | 自由文本标签 |
 
-响应：完整 `UserProfile`（含 `user_id` `segment` `algo_segment` `tonight_mood` `tonight_stress` `profile_version` `updated_at`）。
+响应：完整 `UserProfile`（含 `user_id` `segment` `tonight_mood` `tonight_stress` `profile_version` `updated_at`）。
 
 ### GET `/users/{user_id}/profile`
 
@@ -183,7 +183,6 @@
 {
   "user_id": "u1",
   "segment": "anxiety_relief",
-  "algo_segment": null,
   "audio_type_preferences": ["story"],
   "voice_preferences": ["warm_female"],
   "background_preferences": ["rain_soft"],
@@ -231,37 +230,11 @@
 
 ---
 
-## 5. 检索、推荐与生成
-
-### POST `/normalize`
-
-将自然语言归一化为结构化请求 + 缓存键。
-
-```json
-{ "request_text": "温柔女声讲海边书店的睡前故事，15分钟", "user_id": "u1", "duration_preference_min": 15 }
-```
-
-响应：
-
-```json
-{
-  "normalized_request": {
-    "intent": "story",
-    "language": "zh-CN",
-    "duration_bucket": "long",
-    "duration_sec": 900,
-    "voice_style": "warm_female",
-    "background": "rain_soft",
-    "mood": ["calm", "gentle"],
-    "content_topic": ["海边", "书店"]
-  },
-  "cache_key": "sha256..."
-}
-```
+## 5. 检索与生成
 
 ### POST `/assets/search`
 
-按标签/画像/向量检索候选资产。
+按 Hermes 产出的结构化 filters 查询 approved 资源目录。`query` 只用于可读上下文和极轻量字面匹配；后端不再把用户原话翻译成标签。
 
 ```json
 {
@@ -271,7 +244,8 @@
   "filters": {
     "type": "story",
     "mood_tags": ["calm"],
-    "preferred_tags": [],
+    "required_tags": ["rain", "no_voice"],
+    "preferred_tags": ["ambient"],
     "negative_tags": [],
     "min_duration_sec": 600,
     "max_duration_sec": 1200
@@ -294,21 +268,19 @@
   ],
   "hit": true,
   "best_score": 0.83,
-  "threshold": 0.58
+  "threshold": 0.0,
+  "query_analysis": {
+    "recognized_tags": ["rain", "no_voice"],
+    "negative_tags": ["voice_present"],
+    "excluded_types": ["asmr", "meditation", "podcast_digest", "story"],
+    "hard_constraints": { "required_tags": true, "negative_tags": true, "no_voice": true, "no_thunder": false },
+    "unknown_terms": [],
+    "confidence": 1.0
+  }
 }
 ```
 
-> 前端是否进入「生成」流程，请以 `hit` 字段为准，不要自行用 `score` 判断。
-
-### GET `/users/{user_id}/recommendations?limit=5&query=`
-
-返回推荐列表（`query` 可选）：
-
-```json
-[
-  { "asset": { "id": "aud_abc", "title": "...", "playback_url": "http://..." }, "score": 0.81, "reasons": ["..."] }
-]
-```
+> 前端是否进入「生成」流程，请以 `/agent/decide` 的 `action` 为准。直接调用 `/assets/search` 时，必须传 Hermes/前端自己明确的 filters，不要期待后端理解自然语言。
 
 ### POST `/users/{user_id}/generate-audio`
 
@@ -335,7 +307,7 @@
 
 ### POST `/users/{user_id}/generation-jobs` → 202
 
-异步生成（推荐生产使用）。请求体同上。响应：
+异步生成。请求体同上。响应：
 
 ```json
 {
@@ -406,7 +378,7 @@
   "profile_context": { "...": "..." },
   "search": { "hit": true, "best_score": 0.83, "threshold": 0.58, "results": [] },
   "reasons": ["..."],
-  "planner_meta": { "planner_source": "ai", "planner_confidence": 0.9, "planner_latency_ms": 1200, "fallback_reason": null }
+  "planner_meta": { "planner_source": "hermes", "planner_confidence": 0.9, "planner_latency_ms": 1200, "fallback_reason": null }
 }
 ```
 
@@ -416,7 +388,7 @@
 - `play_asset` → 直接播 `asset.playback_url`
 - `generate_job` → 用 `job_id` 轮询 `GET /generation-jobs/{job_id}`
 - `remix_current` → 用 `remix_job_id` 轮询 `GET /remix-jobs/{job_id}`
-- `no_match` → 提示无结果，可用 `search.results` 做相关推荐兜底
+- `no_match` → 提示无结果，可根据 `reasons` 和 `search.results` 决定是否让用户换一个说法
 
 ---
 
@@ -424,7 +396,9 @@
 
 ### POST `/voice/intent`
 
-首页语音输入专用。前端在一句话**说完**后调用（不发 partial），并自行实现 latest-wins：用户再说一句时把上一条标记为过期。后端原样回显关联 id，并在服务端也做 latest-wins 保护（被取代的旧 turn 跳过生成，省 provider 额度）。
+首页语音输入专用。前端在一句话**说完**后调用（不发 partial），并自行实现 latest-wins：用户再说一句时把上一条标记为过期。
+
+后端先走 Hermes `floppy-voice-dialog` Skill 做对话路由：普通倾诉/闲聊只返回 `chat`，模糊需求返回 `clarify`，只有明确音频意图才继续进入 `floppy-sleep-audio` 播放/生成/混音 workflow。
 
 请求：
 
@@ -436,7 +410,8 @@
   "turnIndex": 12,
   "source": "voice",
   "supersedesRequestId": "uuid-11",
-  "user_id": "demo_user"
+  "user_id": "demo_user",
+  "current_asset_id": null
 }
 ```
 
@@ -449,6 +424,7 @@
 | `source` | string | 否 | 默认 `voice` |
 | `supersedesRequestId` | string \| null | 否 | 被本次取代的上一条 id（当前仅作信息透传/日志） |
 | `user_id` | string | 否 | 默认 `demo_user` |
+| `current_asset_id` | string \| null | 否 | 当前播放资产 id，用于“换一个/加雨声”等 playback edit |
 
 响应：
 
@@ -461,6 +437,9 @@
   "audio_url": "http://10.27.33.19:8000/audio/xxx.mp3",
   "asset": { "id": "aud_xxx", "title": "...", "durationSeconds": 600, "streamUrl": "http://10.27.33.19:8000/audio/xxx.mp3", "source": "Library", "category": "...", "artwork": { "...": "..." } },
   "action": "play_asset",
+  "audio_type": "white_noise",
+  "job_id": null,
+  "job_status": null,
   "hit": true,
   "best_score": 1.0,
   "reasons": ["精确缓存命中"]
@@ -473,7 +452,9 @@
 | `reply` | string | 自然语言回复（同 `/demo/chat` 的 reply_text） |
 | `audio_url` | string \| null | 可播放 URL |
 | `asset` | object \| null | camelCase 的 `AudioItem`（同 Audio 页结构，见第 11 节） |
-| `action` | string | `play_asset` / `generate_job` / `no_match` / **`superseded`** |
+| `action` | string | `chat` / `clarify` / `play_asset` / `generate_job` / `remix_current` / `no_match` / **`superseded`** |
+| `audio_type` | string \| null | voice-dialog 识别的音频意图，仅进入音频 workflow 时通常有值 |
+| `job_id` / `job_status` | string \| null | `generate_job` 时返回，前端轮询 `GET /generation-jobs/{job_id}` |
 
 **latest-wins 关键约定：**
 - 前端只处理当前 active 请求的返回，靠 `clientRequestId` / `turnIndex` 匹配；旧请求即使晚回来也丢弃，不更新首页状态。
@@ -589,13 +570,13 @@ App 连接 `ws://10.27.245.10:8000/v1/speech/stream`。
 {
   "event_type": "audio_play_completed",
   "asset_id": "aud_xxx",
-  "payload": { "play_duration_sec": 780, "completion_rate": 0.87, "source": "agent_recommendation" }
+  "payload": { "play_duration_sec": 780, "completion_rate": 0.87, "source": "hermes" }
 }
 ```
 
 响应：`{ "event_id": "evt_xxx" }`。常用 `event_type`：`audio_play_started` `audio_skipped` `audio_play_completed` `audio_liked` `audio_disliked`。
 
-> **行为记忆（推荐会回读历史）**：通过 `POST /users/{user_id}/playback/{record_id}/feedback` 上报的 `favorite` / `dislike` / `skip` / `complete` / 评分，以及播放进度，会被推荐算法回读并影响后续排序——收藏/完整收听/高评分的同类加权，标记不喜欢/多次跳过的降权剔除。推荐 `reasons` 里会出现「曾收藏」「曾完整收听」「历史高评分」「曾标记不喜欢」「曾多次跳过」等可解释理由。因此前端应在播放结束/用户操作时如实上报反馈，agent 才能「越用越懂」。
+播放反馈会写入历史记录，供后续体验分析和产品策略使用。
 
 ---
 
@@ -765,7 +746,7 @@ PATCH /users/{user_id}/audio/history/{audio_id}    # 更新进度
 
 其他：
 - `is_placeholder`（仅 `/demo/chat`）：`created_by` 为 seed/pregen_local 时为 true
-- remix 输出资产带 `remix` 标签，可参与推荐
+- remix 输出资产带 `remix` 标签，可在资源库中检索
 - 默认命中阈值 `threshold = 0.58`
 - 默认每日额度：字符 200000、生成次数 10（超出返回 429）
 

@@ -23,7 +23,6 @@ CREATE TABLE IF NOT EXISTS user_profiles (
     avg_sleep_latency_min INTEGER NOT NULL,
     mood_tags TEXT NOT NULL,
     segment TEXT NOT NULL,
-    algo_segment TEXT,
     tonight_mood TEXT,
     tonight_stress TEXT,
     profile_version INTEGER NOT NULL DEFAULT 1,
@@ -238,7 +237,6 @@ def _migrate(conn: sqlite3.Connection) -> None:
 
     profile_cols = {row["name"] for row in conn.execute("PRAGMA table_info(user_profiles)").fetchall()}
     profile_additions = {
-        "algo_segment": "TEXT",
         "tonight_mood": "TEXT",
         "tonight_stress": "TEXT",
         "profile_version": "INTEGER NOT NULL DEFAULT 1",

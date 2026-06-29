@@ -208,8 +208,8 @@ def test_blocked_script_raises_guard_error():
         repository=MagicMock(),
         storage=MagicMock(),
         provider=MagicMock(),
-        normalizer=MagicMock(),
-        recommendation_service=MagicMock(),
+        request_defaults=MagicMock(),
+        asset_catalog_service=MagicMock(),
         script_service=MagicMock(),
     )
 

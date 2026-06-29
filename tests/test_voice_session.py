@@ -15,12 +15,15 @@ from floppy_backend.services.dialog_llm import DialogTurn
 from floppy_backend.services.voice_session import (
     EVENT_ASSISTANT_TEXT,
     EVENT_AUDIO,
+    EVENT_AUDIO_ASSET,
+    EVENT_AUDIO_JOB,
     EVENT_SESSION_STARTED,
     EVENT_TURN_END,
     EVENT_USER_TEXT,
     OutboundEvent,
     VoiceSession,
 )
+from floppy_backend.services.voice_dialog_router import VoiceDialogRoute
 
 
 def test_volc_asr_prefers_api_key_headers():
@@ -87,6 +90,21 @@ class FakeTTS:
     async def stream_synthesize(self, text_iter, *, voice_style=None, voice_id=None):
         async for text in text_iter:
             yield f"AUDIO[{text}]".encode("utf-8")
+
+
+class FakeRouter:
+    def __init__(self, route: VoiceDialogRoute):
+        self.route = route
+        self.calls: list[tuple[str, str | None]] = []
+
+    async def __call__(
+        self,
+        history: list[DialogTurn],
+        user_text: str,
+        current_asset_id: str | None,
+    ) -> VoiceDialogRoute:
+        self.calls.append((user_text, current_asset_id))
+        return self.route
 
 
 async def _collect(session: VoiceSession, audio_chunks: list[bytes]) -> list[OutboundEvent]:
@@ -184,3 +202,131 @@ def test_barge_in_cancels_in_flight_turn():
     # second (completed) turn — not two full turns.
     user_turns = [t for t in session.history if t.role == "user"]
     assert "打断你" in [t.content for t in user_turns]
+
+
+def test_dialog_router_chat_turn_does_not_resolve_audio():
+    asr = FakeASR([FakeASRResult("我睡不着", is_final=True)])
+    router = FakeRouter(
+        VoiceDialogRoute(
+            action="chat",
+            reply_text="听起来今晚不太容易，我在这里陪你。",
+            reasons=["用户在倾诉"],
+        )
+    )
+
+    async def fail_resolver(request_text: str, audio_type: str, current_asset_id: str | None):
+        raise AssertionError("chat route should not resolve audio")
+
+    session = VoiceSession(
+        asr=asr,
+        tts=FakeTTS(),
+        dialog_router=router,
+        audio_resolver=fail_resolver,
+    )
+
+    events = asyncio.run(_collect(session, [b"x"]))
+
+    assert router.calls == [("我睡不着", None)]
+    assert [e.text for e in events if e.type == EVENT_ASSISTANT_TEXT] == ["听起来今晚不太容易，我在这里陪你。"]
+    assert not [e for e in events if e.type == EVENT_AUDIO_ASSET]
+    assert session.history[-1] == DialogTurn(role="assistant", content="听起来今晚不太容易，我在这里陪你。")
+
+
+def test_dialog_router_audio_workflow_resolves_asset_after_reply():
+    asr = FakeASR([FakeASRResult("放点雨声", is_final=True)])
+    router = FakeRouter(
+        VoiceDialogRoute(
+            action="audio_workflow",
+            reply_text="好的，我给你找一段雨声。",
+            audio_request_text="给我放雨声，不要人声",
+            audio_intent_hint="white_noise",
+            reasons=["用户明确要雨声"],
+        )
+    )
+    resolver_calls: list[tuple[str, str, str | None]] = []
+
+    async def resolver(request_text: str, audio_type: str, current_asset_id: str | None):
+        resolver_calls.append((request_text, audio_type, current_asset_id))
+        return {"url": "http://127.0.0.1/audio/rain.mp3", "title": "夜雨轻敲", "asset_id": "aud_rain"}
+
+    session = VoiceSession(
+        asr=asr,
+        tts=FakeTTS(),
+        dialog_router=router,
+        audio_resolver=resolver,
+    )
+
+    events = asyncio.run(_collect(session, [b"x"]))
+    asset_events = [e for e in events if e.type == EVENT_AUDIO_ASSET]
+
+    assert router.calls == [("放点雨声", None)]
+    assert resolver_calls == [("给我放雨声，不要人声", "white_noise", None)]
+    assert len(asset_events) == 1
+    assert asset_events[0].url == "http://127.0.0.1/audio/rain.mp3"
+    assert asset_events[0].text == "夜雨轻敲"
+    assert asset_events[0].audio_type == "white_noise"
+    assert asset_events[0].asset_id == "aud_rain"
+    assert session.current_asset_id == "aud_rain"
+
+
+def test_dialog_router_remix_uses_current_asset_context():
+    asr = FakeASR([FakeASRResult("加点海浪", is_final=True)])
+    router = FakeRouter(
+        VoiceDialogRoute(
+            action="remix_current",
+            reply_text="好的，我给当前音频加一点海浪。",
+            audio_request_text="给当前音频加一点海浪",
+            audio_intent_hint="white_noise",
+        )
+    )
+    resolver_calls: list[tuple[str, str, str | None]] = []
+
+    async def resolver(request_text: str, audio_type: str, current_asset_id: str | None):
+        resolver_calls.append((request_text, audio_type, current_asset_id))
+        return {"url": "http://127.0.0.1/audio/remix.mp3", "title": "海浪混音", "asset_id": "aud_remix"}
+
+    session = VoiceSession(
+        asr=asr,
+        tts=FakeTTS(),
+        dialog_router=router,
+        audio_resolver=resolver,
+        current_asset_id="aud_original",
+    )
+
+    events = asyncio.run(_collect(session, [b"x"]))
+    asset_events = [e for e in events if e.type == EVENT_AUDIO_ASSET]
+
+    assert router.calls == [("加点海浪", "aud_original")]
+    assert resolver_calls == [("给当前音频加一点海浪", "white_noise", "aud_original")]
+    assert asset_events[0].asset_id == "aud_remix"
+    assert session.current_asset_id == "aud_remix"
+
+
+def test_dialog_router_generation_job_emits_pollable_job_event():
+    asr = FakeASR([FakeASRResult("讲个故事", is_final=True)])
+    router = FakeRouter(
+        VoiceDialogRoute(
+            action="audio_workflow",
+            reply_text="好的，我给你准备一段故事。",
+            audio_request_text="讲个睡前故事",
+            audio_intent_hint="story",
+        )
+    )
+
+    async def resolver(request_text: str, audio_type: str, current_asset_id: str | None):
+        return {"job_id": "job_story", "job_status": "queued", "audio_type": audio_type}
+
+    session = VoiceSession(
+        asr=asr,
+        tts=FakeTTS(),
+        dialog_router=router,
+        audio_resolver=resolver,
+    )
+
+    events = asyncio.run(_collect(session, [b"x"]))
+    job_events = [e for e in events if e.type == EVENT_AUDIO_JOB]
+
+    assert len(job_events) == 1
+    assert job_events[0].job_id == "job_story"
+    assert job_events[0].job_status == "queued"
+    assert job_events[0].audio_type == "story"

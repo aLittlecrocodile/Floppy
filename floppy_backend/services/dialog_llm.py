@@ -1,12 +1,4 @@
-"""Streaming dialog LLM client for realtime voice conversation.
-
-Reuses the OpenAI-compatible chat completions endpoint that the query planner
-talks to (base_url/api_key/model), but streams tokens (stream=True) so the
-TTS pipeline can begin synthesizing as soon as the first sentence is ready.
-
-This is intentionally separate from query_planner.AIQueryPlanner, which does
-one-shot JSON tag extraction — different prompt, different output contract.
-"""
+"""Streaming dialog LLM client for realtime voice conversation."""
 
 from __future__ import annotations
 
@@ -16,7 +8,7 @@ from dataclasses import dataclass
 
 import httpx
 
-from floppy_backend.config import Settings
+from floppy_backend.config import Settings, legacy_llm_api_key
 
 # Sentence-final punctuation used to chunk the token stream into TTS-sized
 # pieces. We flush a chunk as soon as one of these is seen so synthesis can
@@ -39,14 +31,14 @@ class DialogLLM:
     """Streaming chat client producing assistant text token-by-token."""
 
     def __init__(self, settings: Settings):
-        api_key = settings.dialog_llm_api_key or settings.query_planner_api_key
+        api_key = settings.dialog_llm_api_key or settings.llm_api_key or legacy_llm_api_key() or settings.hermes_api_key
         if not api_key:
             raise DialogLLMError(
-                "dialog LLM requires FLOPPY_DIALOG_LLM_API_KEY or FLOPPY_QUERY_PLANNER_API_KEY"
+                "dialog LLM requires FLOPPY_DIALOG_LLM_API_KEY, FLOPPY_LLM_API_KEY, or FLOPPY_HERMES_API_KEY"
             )
         self._api_key = api_key
-        self._base_url = (settings.dialog_llm_base_url or settings.query_planner_base_url).rstrip("/")
-        self._model = settings.dialog_llm_model or settings.query_planner_model
+        self._base_url = (settings.dialog_llm_base_url or settings.llm_base_url).rstrip("/")
+        self._model = settings.dialog_llm_model or settings.llm_model
         self._settings = settings
 
     def _build_messages(self, history: list[DialogTurn], user_text: str) -> list[dict]:

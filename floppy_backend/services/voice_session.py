@@ -1,6 +1,6 @@
 """Full-duplex voice dialog session orchestration.
 
-Wires together streaming ASR -> dialog LLM -> streaming TTS into one
+Wires together streaming ASR -> dialog router/LLM -> streaming TTS into one
 conversational turn loop, with barge-in support (a new user utterance cancels
 the in-flight LLM+TTS so the agent stops talking and listens).
 
@@ -19,6 +19,7 @@ from typing import Protocol
 from uuid import uuid4
 
 from floppy_backend.services.dialog_llm import DialogTurn
+from floppy_backend.services.voice_dialog_router import VoiceDialogRoute
 from floppy_backend.utils import utcnow
 
 # Outbound event types pushed to the client.
@@ -27,6 +28,7 @@ EVENT_USER_TEXT = "user_text"          # ASR result (partial/final)
 EVENT_ASSISTANT_TEXT = "assistant_text"  # LLM sentence about to be spoken
 EVENT_AUDIO = "audio"                  # TTS audio bytes
 EVENT_AUDIO_ASSET = "audio_asset"      # a sleep-audio asset to play (url + meta)
+EVENT_AUDIO_JOB = "audio_job"          # a sleep-audio generation job to poll
 EVENT_TURN_END = "turn_end"            # assistant finished a turn
 EVENT_ERROR = "error"
 
@@ -48,6 +50,9 @@ class OutboundEvent:
     created_at: str | None = None
     url: str | None = None         # audio_asset: playback URL
     audio_type: str | None = None  # audio_asset: story/meditation/...
+    asset_id: str | None = None
+    job_id: str | None = None
+    job_status: str | None = None
 
     def text_payload(self) -> dict:
         payload = {
@@ -62,6 +67,11 @@ class OutboundEvent:
         }
         if self.type == EVENT_AUDIO_ASSET:
             payload["url"] = self.url
+            payload["audio_type"] = self.audio_type
+            payload["asset_id"] = self.asset_id
+        if self.type == EVENT_AUDIO_JOB:
+            payload["job_id"] = self.job_id
+            payload["job_status"] = self.job_status
             payload["audio_type"] = self.audio_type
         return payload
 
@@ -80,22 +90,25 @@ class TTSComponent(Protocol):
     ) -> AsyncIterator[bytes]: ...
 
 
-# Resolves a user request + desired audio_type into a playable asset dict
-# ({"url": ..., "title": ..., "audio_type": ...}) or None if nothing matched.
-# Injected by the transport layer so VoiceSession stays decoupled from app state.
-AudioResolver = Callable[[str, str], Awaitable[dict | None]]
+# Resolves a user request + desired audio_type into a playable asset dict or a
+# queued job dict. Injected by the transport layer so VoiceSession stays
+# decoupled from app state.
+AudioResolver = Callable[[str, str, str | None], Awaitable[dict | None]]
+DialogRouter = Callable[[list[DialogTurn], str, str | None], Awaitable[VoiceDialogRoute]]
 
 
 @dataclass
 class VoiceSession:
     asr: ASRComponent
-    llm: LLMComponent
     tts: TTSComponent
+    llm: LLMComponent | None = None
     session_id: str = field(default_factory=lambda: f"vs_{uuid4().hex}")
     user_id: str | None = None
     voice_style: str | None = None
     history: list[DialogTurn] = field(default_factory=list)
     audio_resolver: AudioResolver | None = None
+    dialog_router: DialogRouter | None = None
+    current_asset_id: str | None = None
     _seq: int = 0
     _turn_index: int = 0
 
@@ -116,6 +129,9 @@ class VoiceSession:
         turn_id: str | None = None,
         url: str | None = None,
         audio_type: str | None = None,
+        asset_id: str | None = None,
+        job_id: str | None = None,
+        job_status: str | None = None,
     ) -> OutboundEvent:
         self._seq += 1
         return OutboundEvent(
@@ -130,6 +146,9 @@ class VoiceSession:
             created_at=utcnow().isoformat(),
             url=url,
             audio_type=audio_type,
+            asset_id=asset_id,
+            job_id=job_id,
+            job_status=job_status,
         )
 
     async def _respond(
@@ -148,6 +167,13 @@ class VoiceSession:
         injected audio_resolver is queried; a matching asset is pushed as an
         EVENT_AUDIO_ASSET so the client can play a real sleep-audio asset.
         """
+        if self.dialog_router is not None:
+            await self._respond_with_route(user_text, turn_id, emit)
+            return
+
+        if self.llm is None:
+            raise RuntimeError("VoiceSession requires llm or dialog_router")
+
         sentence_queue: asyncio.Queue[str | None] = asyncio.Queue()
         spoken: list[str] = []
         detected = {"audio_type": None}  # set from the first sentence's marker
@@ -193,15 +219,75 @@ class VoiceSession:
         # Resolve and push a sleep-audio asset if the LLM signalled one.
         if detected["audio_type"] and self.audio_resolver is not None:
             try:
-                asset = await self.audio_resolver(user_text, detected["audio_type"])
+                asset = await self.audio_resolver(user_text, detected["audio_type"], self.current_asset_id)
             except Exception:  # noqa: BLE001 — resolution failure shouldn't break the turn
                 asset = None
             if asset and asset.get("url"):
+                self.current_asset_id = asset.get("asset_id") or asset.get("id") or self.current_asset_id
                 await emit(self._event(
                     EVENT_AUDIO_ASSET,
                     text=asset.get("title"),
                     url=asset["url"],
                     audio_type=detected["audio_type"],
+                    asset_id=asset.get("asset_id") or asset.get("id"),
+                    turn_id=turn_id,
+                ))
+            elif asset and asset.get("job_id"):
+                await emit(self._event(
+                    EVENT_AUDIO_JOB,
+                    text=asset.get("title"),
+                    audio_type=detected["audio_type"],
+                    job_id=asset.get("job_id"),
+                    job_status=asset.get("job_status"),
+                    turn_id=turn_id,
+                ))
+
+        await emit(self._event(EVENT_TURN_END, is_final=True, turn_id=turn_id))
+
+    async def _respond_with_route(
+        self,
+        user_text: str,
+        turn_id: str,
+        emit: Callable[[OutboundEvent], Awaitable[None]],
+    ) -> None:
+        route = await self.dialog_router(self.history, user_text, self.current_asset_id)  # type: ignore[misc]
+        action = route.normalized_action()
+        reply_text = route.response_text()
+
+        async def _reply_iter() -> AsyncIterator[str]:
+            yield reply_text
+
+        await emit(self._event(EVENT_ASSISTANT_TEXT, text=reply_text, turn_id=turn_id))
+        async for audio in self.tts.stream_synthesize(_reply_iter(), voice_style=self.voice_style):
+            await emit(self._event(EVENT_AUDIO, audio=audio, turn_id=turn_id))
+
+        self.history.append(DialogTurn(role="user", content=user_text))
+        self.history.append(DialogTurn(role="assistant", content=reply_text))
+
+        if action in {"audio_workflow", "remix_current"} and self.audio_resolver is not None:
+            audio_type = route.audio_intent_hint or "unknown"
+            request_text = route.audio_text(user_text)
+            try:
+                asset = await self.audio_resolver(request_text, audio_type, self.current_asset_id)
+            except Exception:  # noqa: BLE001 — resolution failure shouldn't break the turn
+                asset = None
+            if asset and asset.get("url"):
+                self.current_asset_id = asset.get("asset_id") or asset.get("id") or self.current_asset_id
+                await emit(self._event(
+                    EVENT_AUDIO_ASSET,
+                    text=asset.get("title"),
+                    url=asset["url"],
+                    audio_type=audio_type,
+                    asset_id=asset.get("asset_id") or asset.get("id"),
+                    turn_id=turn_id,
+                ))
+            elif asset and asset.get("job_id"):
+                await emit(self._event(
+                    EVENT_AUDIO_JOB,
+                    text=asset.get("title"),
+                    audio_type=audio_type,
+                    job_id=asset.get("job_id"),
+                    job_status=asset.get("job_status"),
                     turn_id=turn_id,
                 ))
 

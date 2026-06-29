@@ -12,9 +12,7 @@ Base URL: `http://127.0.0.1:8000`
 | GET | `/users/{user_id}/profile` | Get profile |
 | POST | `/users/{user_id}/profile/checkin` | Tonight's mood/stress |
 | GET | `/users/{user_id}/profile/context` | Profile + budget |
-| POST | `/normalize` | Normalize request text |
-| POST | `/assets/search` | Search audio assets |
-| GET | `/users/{user_id}/recommendations` | Get recommendations |
+| POST | `/assets/search` | Structured search over approved audio assets |
 | POST | `/users/{user_id}/generate-audio` | Sync generate |
 | POST | `/users/{user_id}/generation-jobs` | Async generate (202) |
 | GET | `/generation-jobs/{job_id}` | Get job status |
@@ -163,3 +161,4 @@ Poll remix job status.
 - `is_placeholder` in `/demo/chat`: true when `created_by` is seed/pregen_local
 - Remix output assets have tag `remix` and are eligible for recommendation
 - Generation jobs now track `target_duration_sec` and `actual_duration_sec` fields (nullable, populated when available)
+- `/assets/search` executes explicit filters (`type`, `required_tags`, `preferred_tags`, `negative_tags`, `mood_tags`, duration bounds). User intent classification belongs in Hermes Skill/MCP logic, not in the catalog service.

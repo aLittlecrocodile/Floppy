@@ -21,7 +21,7 @@ from floppy_backend.db import connect, initialize
 from floppy_backend.models import AudioAssetIn, AudioType, GenerationRequest
 from floppy_backend.providers.audio import LocalToneAudioProvider, build_audio_provider
 from floppy_backend.repositories import Repository
-from floppy_backend.services.normalizer import RequestNormalizer
+from floppy_backend.services.request_defaults import RequestDefaults
 from floppy_backend.services.script_expander import expand_script
 from floppy_backend.storage import LocalFileStorage
 from floppy_backend.utils import sha256_json, text_embedding
@@ -34,7 +34,7 @@ def main():
     initialize(conn)
     repository = Repository(conn)
     storage = LocalFileStorage(settings.storage_dir, settings.public_base_url)
-    normalizer = RequestNormalizer()
+    request_defaults = RequestDefaults()
     local_provider = LocalToneAudioProvider()
 
     minimax_provider = None
@@ -46,7 +46,7 @@ def main():
 
     results = []
     for item in AUDIO_CATALOG:
-        normalized = normalizer.normalize(GenerationRequest(request_text=item["request_text"]), profile=None)
+        normalized = request_defaults.normalize(GenerationRequest(request_text=item["request_text"]), profile=None)
         cache_key = sha256_json({
             "normalized": normalized.model_dump(mode="json"),
             "title": item["title"],

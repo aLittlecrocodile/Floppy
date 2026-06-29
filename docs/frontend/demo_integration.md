@@ -6,10 +6,10 @@
 
 1. 用户输入一句助眠需求。
 2. 前端提交给后端。
-3. 后端使用 AI Planner 理解需求。
-4. 命中缓存音频则直接返回播放地址。
-5. 未命中则调用 MiniMax 生成音频，再返回播放地址。
-6. 前端在线播放音频。
+3. Hermes Skill 理解需求并选择播放、生成或混音 workflow。
+4. 命中资源则直接返回播放地址。
+5. 未命中且允许生成时返回生成任务。
+6. 前端播放音频或轮询任务结果。
 
 ---
 
@@ -75,7 +75,7 @@ http://127.0.0.1:8010/demo
     "匹配音频偏好"
   ],
   "planner_meta": {
-    "planner_source": "ai",
+    "planner_source": "hermes",
     "planner_confidence": 0.9,
     "planner_latency_ms": 6500,
     "fallback_reason": null
@@ -91,27 +91,27 @@ http://127.0.0.1:8010/demo
 | `audio_url` | string \| null | 可播放音频 URL。前端播放器主要使用这个字段 |
 | `asset` | object \| null | 音频资产信息。命中缓存或生成成功时返回 |
 | `job_id` | string \| null | 生成任务 ID。仅生成路径存在 |
-| `job_status` | string \| null | 生成任务状态。Demo 接口当前会同步等待生成完成 |
+| `job_status` | string \| null | 生成任务状态。需要生成时前端用 `job_id` 轮询结果 |
 | `best_score` | number \| null | 检索最高分 |
 | `hit` | boolean | 是否命中缓存资产 |
 | `threshold` | number | 当前命中阈值，默认 `0.58` |
-| `reasons` | string[] | 推荐或生成原因 |
-| `planner_meta` | object \| null | AI Planner 元信息 |
+| `reasons` | string[] | 播放或生成原因 |
+| `planner_meta` | object \| null | Hermes 决策元信息 |
 
 `planner_meta` 字段：
 
 | 字段 | 类型 | 说明 |
 |---|---|---|
-| `planner_source` | string | `ai` 表示真实 AI Planner；`rule` 表示规则；`ai_fallback` 表示 AI 失败后回退 |
-| `planner_confidence` | number | AI 对结构化标签的置信度 |
-| `planner_latency_ms` | number | Planner 调用耗时 |
+| `planner_source` | string | `hermes` 表示 Hermes 完成决策 |
+| `planner_confidence` | number | Hermes 对动作选择的置信度 |
+| `planner_latency_ms` | number | Hermes 调用耗时 |
 | `fallback_reason` | string \| null | fallback 原因 |
 
 ---
 
 ## 3. 前端页面流程
 
-推荐最小流程：
+查找/播放最小流程：
 
 ```text
 用户输入 request_text
@@ -163,12 +163,11 @@ async function submit(requestText) {
 | idle | 初始状态 | 就绪 |
 | loading | 请求已发出，未返回 | 处理中... |
 | success with audio | `audio_url` 非空 | 完成，可播放 |
-| success without audio | `audio_url` 为空 | 完成，但没有音频 |
+| success without audio | `audio_url` 为空且 `job_id` 非空 | 已创建生成任务，轮询 job |
+| success without audio | `audio_url` 为空且无 `job_id` | 完成，但没有音频 |
 | error | HTTP 4xx/5xx 或网络错误 | 失败：错误信息 |
 
-当前 `/demo/chat` 是 Demo 友好接口：后端会同步处理生成任务，前端不需要轮询。
-
-生产版本可以改为异步：
+当前 `/demo/chat` 是 Demo 友好接口：命中已有音频会直接返回 `audio_url`；需要新生成时返回 `job_id`，前端轮询：
 
 ```text
 POST /agent/decide
@@ -194,13 +193,10 @@ GET /generation-jobs/{job_id}
       v
 [Hermes Agent Runtime]
       |
-      +--> [本地资产检索上下文]
-      |          |
-      |          v
-      |    StructuredQuery: tags / mood / confidence
+      +--> [资源目录候选 + profile context]
       |
       v
-[RecommendationService 资产检索]
+[AssetCatalogService 资源目录查询]
       |
       +-- 命中 --> [Audio Asset DB + Local Storage] --> 返回 audio_url
       |
@@ -223,7 +219,7 @@ GET /generation-jobs/{job_id}
 已实现：
 
 - 页面输入一句自然语言。
-- 后端调用 AI Planner 生成结构化标签。
+- Hermes Skill 生成结构化资源检索计划并选择 workflow。
 - 命中资产库后返回可播放音频 URL。
 - 未命中时调用 MiniMax 生成音频。
 - 音频保存到本地并通过 `/audio/{object_key}` 播放。
@@ -234,7 +230,7 @@ GET /generation-jobs/{job_id}
 - MiniMax 当前生成的是语音音频，不是视频。
 - 背景雨声目前主要是文本/标签语义，不代表一定混入真实雨声音轨。
 - Demo 用户画像是后端默认写死的 `demo_user`，还没有前端画像编辑页。
-- 生成等待当前由 `/demo/chat` 同步完成；生产版本应改为异步 job 轮询。
+- 生成任务由 `/demo/chat` 返回 `job_id` 后异步执行；前端应轮询 job 直到完成。
 
 TBD：
 
@@ -254,7 +250,7 @@ TBD：
 ```text
 ┌──────────────────────────────┐
 │ 输入框：用户助眠需求          │
-│ [生成 / 推荐音频]             │
+│ [播放 / 生成音频]             │
 │ 状态：处理中 / 完成 / 失败    │
 │                              │
 │ 指标：action / score / planner│

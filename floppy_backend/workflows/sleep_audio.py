@@ -4,8 +4,9 @@ import time
 from dataclasses import dataclass
 
 from floppy_backend.config import Settings
-from floppy_backend.models import AudioAsset, AudioAssetIn, AudioScript, GenerationDirective, NormalizedAudioRequest, UserProfile
+from floppy_backend.models import AudioAsset, AudioAssetIn, AudioScript, AudioType, GenerationDirective, NormalizedAudioRequest, UserProfile
 from floppy_backend.providers.audio import AudioGenerationProvider, GeneratedAudio
+from floppy_backend.providers.ambient import detect_sound_type, generate_ambient_wav
 from floppy_backend.repositories import Repository
 from floppy_backend.services import script_guard
 from floppy_backend.services.minimax_hubless import build_sleep_music_prompt, ffmpeg_mix, probe_audio
@@ -89,6 +90,9 @@ class SleepAudioWorkflowService:
         sleep_script = self.script_service.generate(normalized, profile, directive)
         return self.repository.upsert_audio_script(sleep_script.to_input(user_id))
 
+    def script_required(self, normalized: NormalizedAudioRequest) -> bool:
+        return normalized.intent not in {AudioType.WHITE_NOISE, AudioType.MUSIC}
+
     def run(
         self,
         *,
@@ -99,14 +103,15 @@ class SleepAudioWorkflowService:
         script: AudioScript | None,
         directive: GenerationDirective | None = None,
     ) -> SleepAudioWorkflowResult:
-        if script is None:
+        if script is None and self.script_required(normalized):
             script = self.prepare_script(user_id=user_id, normalized=normalized, profile=profile, directive=directive)
 
-        if script.safety_status != "approved":
+        if script is not None and script.safety_status != "approved":
             notes = ", ".join(script.safety_notes)
             raise script_guard.ScriptGuardError(f"script guard rejected script: {script.safety_status}; {notes}")
 
-        request = self.build_request(user_id=user_id, cache_key=cache_key, normalized=normalized, profile=profile, title_hint=script.title)
+        title_hint = script.title if script is not None else _non_voice_title(normalized, directive)
+        request = self.build_request(user_id=user_id, cache_key=cache_key, normalized=normalized, profile=profile, title_hint=title_hint)
         started = time.perf_counter()
         generated = self._generate_audio(user_id=user_id, cache_key=cache_key, normalized=normalized, request=request, script=script)
         asset = self._upsert_asset(user_id=user_id, cache_key=cache_key, normalized=normalized, profile=profile, generated=generated)
@@ -122,8 +127,16 @@ class SleepAudioWorkflowService:
         cache_key: str,
         normalized: NormalizedAudioRequest,
         request: SleepAudioWorkflowRequest,
-        script: AudioScript,
+        script: AudioScript | None,
     ) -> GeneratedAudio:
+        if not self.script_required(normalized):
+            return self._generate_non_voice_audio(
+                user_id=user_id,
+                cache_key=cache_key,
+                normalized=normalized,
+                directive=request.intent.title_hint,
+            )
+
         output_ext = "mp3" if self.provider.name == "minimax_t2a" else "wav"
         music_mix_enabled = self._music_mix_enabled(request)
         suffix = "_voice" if music_mix_enabled else ""
@@ -139,6 +152,33 @@ class SleepAudioWorkflowService:
         if music_mix_enabled:
             return self._mix_minimax_music_layer(user_id=user_id, cache_key=cache_key, normalized=normalized, request=request, speech=generated)
         return generated
+
+    def _generate_non_voice_audio(
+        self,
+        *,
+        user_id: str,
+        cache_key: str,
+        normalized: NormalizedAudioRequest,
+        directive: str | None,
+    ) -> GeneratedAudio:
+        object_key = f"ondemand/{user_id}/{cache_key[:16]}.wav"
+        output_path = self.storage.path_for(object_key)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        title = directive or _non_voice_title(normalized, None)
+        sound_type = detect_sound_type(" ".join([title, normalized.background]), normalized.content_topic)
+        duration_cap = self.settings.local_provider_max_duration_sec if self.settings and self.settings.local_provider_max_duration_sec else 120
+        duration_sec = min(normalized.duration_sec, duration_cap)
+        generate_ambient_wav(output_path, sound_type, duration_sec)
+        return GeneratedAudio(
+            object_key=object_key,
+            path=output_path,
+            duration_sec=duration_sec,
+            title=title,
+            content_hash=sha256_text(output_path.read_bytes().hex()),
+            provider_model="ambient_procedural_v1",
+            provider_status="succeeded",
+            provider_payload={"sound_type": sound_type, "non_voice": True},
+        )
 
     def _mix_minimax_music_layer(
         self,
@@ -219,6 +259,7 @@ class SleepAudioWorkflowService:
                 prompt_hash=cache_key,
                 content_hash=generated.content_hash,
                 mood_tags=normalized.mood,
+                tags=_asset_tags(normalized),
                 user_segment_tags=[profile.segment if profile else "balanced_sleep"],
                 quality_score=0.72,
                 embedding=text_embedding(
@@ -243,14 +284,15 @@ class SleepAudioWorkflowService:
         *,
         request: SleepAudioWorkflowRequest,
         normalized: NormalizedAudioRequest,
-        script: AudioScript,
+        script: AudioScript | None,
         generated: GeneratedAudio,
         asset: AudioAsset,
     ) -> WorkflowStatusResponse:
-        music_enabled = self._music_mix_enabled(request)
+        music_enabled = script is not None and self._music_mix_enabled(request)
         steps = [
-            WorkflowStepState(name="script", status=WorkflowStepStatus.SUCCEEDED),
-            WorkflowStepState(name="speech", status=WorkflowStepStatus.SUCCEEDED),
+            WorkflowStepState(name="script", status=WorkflowStepStatus.SUCCEEDED if script is not None else WorkflowStepStatus.SKIPPED),
+            WorkflowStepState(name="speech", status=WorkflowStepStatus.SUCCEEDED if script is not None else WorkflowStepStatus.SKIPPED),
+            WorkflowStepState(name="ambient", status=WorkflowStepStatus.SUCCEEDED if script is None else WorkflowStepStatus.SKIPPED),
             WorkflowStepState(name="music", status=WorkflowStepStatus.SUCCEEDED if music_enabled else WorkflowStepStatus.SKIPPED),
             WorkflowStepState(name="mix_audio", status=WorkflowStepStatus.SUCCEEDED if music_enabled else WorkflowStepStatus.SKIPPED),
             WorkflowStepState(name="asset", status=WorkflowStepStatus.SUCCEEDED),
@@ -274,9 +316,9 @@ class SleepAudioWorkflowService:
                 content_type=normalized.intent,
             ),
             diagnostics=WorkflowDiagnostics(
-                script_hash=script.script_hash,
-                script_chars=len(script.script_text),
-                voice_id=self._resolved_voice_id(normalized.voice_style),
+                script_hash=script.script_hash if script is not None else None,
+                script_chars=len(script.script_text) if script is not None else None,
+                voice_id=self._resolved_voice_id(normalized.voice_style) if script is not None else None,
                 voice_object_key=voice_object_key,
                 music_object_key=music_object_key,
                 mixed_object_key=mixed_object_key,
@@ -330,3 +372,24 @@ class SleepAudioWorkflowService:
     def _summary(self, normalized: NormalizedAudioRequest) -> str:
         minutes = max(1, round(normalized.duration_sec / 60))
         return f"生成约{minutes}分钟的{normalized.intent.value}音频"
+
+
+def _non_voice_title(normalized: NormalizedAudioRequest, directive: GenerationDirective | None) -> str:
+    if directive is not None and directive.content_brief:
+        return directive.content_brief[:40]
+    if "rain" in normalized.content_topic or normalized.background == "rain_soft":
+        return "持续雨声"
+    if "ocean" in normalized.content_topic or normalized.background == "ocean_soft":
+        return "平稳海浪"
+    if normalized.intent == AudioType.MUSIC:
+        return "安静助眠音乐"
+    return "自然白噪音"
+
+
+def _asset_tags(normalized: NormalizedAudioRequest) -> list[str]:
+    tags = {"low_stimulation", *normalized.content_topic}
+    if normalized.intent in {AudioType.WHITE_NOISE, AudioType.MUSIC}:
+        tags.update({"ambient", "no_voice"})
+    if normalized.intent == AudioType.MUSIC:
+        tags.add("slow_pace")
+    return sorted(tag for tag in tags if tag and tag != "sleep")

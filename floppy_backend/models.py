@@ -36,7 +36,6 @@ class UserProfileIn(BaseModel):
 class UserProfile(UserProfileIn):
     user_id: str
     segment: str
-    algo_segment: str | None = None
     tonight_mood: str | None = None
     tonight_stress: ProfileLevel | None = None
     profile_version: int = 1
@@ -58,20 +57,10 @@ class ProfileContext(UserProfile):
     generation_budget: GenerationBudget
 
 
-class NormalizeRequestIn(BaseModel):
-    request_text: str = Field(min_length=2, max_length=1000)
-    user_id: str | None = None
-    duration_preference_min: int | None = Field(default=None, ge=5, le=60)
-
-
-class NormalizedRequestOut(BaseModel):
-    normalized_request: "NormalizedAudioRequest"
-    cache_key: str
-
-
 class AssetSearchFilters(BaseModel):
     type: AudioType | None = None
     mood_tags: list[str] = Field(default_factory=list)
+    required_tags: list[str] = Field(default_factory=list)
     preferred_tags: list[str] = Field(default_factory=list)
     negative_tags: list[str] = Field(default_factory=list)
     min_duration_sec: int | None = Field(default=None, ge=1)
@@ -93,11 +82,31 @@ class AssetSearchResult(BaseModel):
     reasons: list[str]
 
 
+class CatalogQueryAnalysis(BaseModel):
+    recognized_tags: list[str] = Field(default_factory=list)
+    negative_tags: list[str] = Field(default_factory=list)
+    excluded_types: list[AudioType] = Field(default_factory=list)
+    hard_constraints: dict[str, bool] = Field(default_factory=dict)
+    unknown_terms: list[str] = Field(default_factory=list)
+    confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+
+
 class AssetSearchResponse(BaseModel):
     results: list[AssetSearchResult]
     hit: bool
     best_score: float | None
     threshold: float
+    query_analysis: CatalogQueryAnalysis | None = None
+
+
+class AudioAssetFacets(BaseModel):
+    total_assets: int
+    asset_types: list[str] = Field(default_factory=list)
+    mood_tags: list[str] = Field(default_factory=list)
+    tags: list[str] = Field(default_factory=list)
+    voice_ids: list[str] = Field(default_factory=list)
+    user_segment_tags: list[str] = Field(default_factory=list)
+    top_assets: list["AudioAsset"] = Field(default_factory=list)
 
 
 class AudioAssetIn(BaseModel):
@@ -141,12 +150,6 @@ class AudioScriptIn(BaseModel):
 class AudioScript(AudioScriptIn):
     id: str
     created_at: datetime
-
-
-class Recommendation(BaseModel):
-    asset: AudioAsset
-    score: float
-    reasons: list[str]
 
 
 class GenerationDirective(BaseModel):
@@ -249,6 +252,32 @@ class GenerationJobCreateResponse(BaseModel):
     match_type: str
     asset: AudioAsset | None
     normalized_request: NormalizedAudioRequest
+
+
+class UploadGenerateAudioIn(BaseModel):
+    request_text: str | None = Field(default=None, min_length=2, max_length=1000)
+    audio_intent: AudioType = AudioType.PODCAST_DIGEST
+    tone: str = Field(default="低信息密度、温柔、适合睡前", max_length=120)
+    duration_sec: int | None = Field(default=None, ge=30, le=3600)
+    voice_style: str | None = Field(default=None, max_length=80)
+    force_generate: bool = True
+
+
+class ScriptSafetyCheckIn(BaseModel):
+    script_text: str = Field(min_length=1, max_length=20_000)
+    estimated_duration_sec: int = Field(default=600, ge=1, le=3600)
+
+
+class ScriptSafetyCheckOut(BaseModel):
+    status: str
+    safe: bool
+    quality_ok: bool
+    violations: list[str] = Field(default_factory=list)
+    quality_notes: list[str] = Field(default_factory=list)
+    all_notes: list[str] = Field(default_factory=list)
+    estimated_chars: int = 0
+    estimated_duration_sec: int = 0
+    estimated_cost_usd: float = 0.0
 
 
 class EventIn(BaseModel):
@@ -484,7 +513,7 @@ class UploadItem(BaseModel):
     fileType: str
     sizeLabel: str = ""
     progress: float = 0.0
-    status: str = "Idle"  # Idle | Uploading | Failed | Completed
+    status: str = "Idle"  # Idle | Uploading | Generating | Failed | Completed
     message: str | None = None
     generatedAudio: AudioItem | None = None
 
@@ -527,6 +556,7 @@ class VoiceIntentIn(BaseModel):
     source: str = "voice"
     supersedesRequestId: str | None = None
     user_id: str = "demo_user"
+    current_asset_id: str | None = None
 
 
 class VoiceIntentResponse(BaseModel):
@@ -538,7 +568,10 @@ class VoiceIntentResponse(BaseModel):
     reply: str
     audio_url: str | None = None
     asset: AudioItem | None = None
-    action: str  # play_asset | generate_job | no_match | superseded
+    action: str  # chat | clarify | play_asset | generate_job | remix_current | no_match | superseded
+    audio_type: str | None = None
+    job_id: str | None = None
+    job_status: str | None = None
     hit: bool = False
     best_score: float | None = None
     reasons: list[str] = Field(default_factory=list)
@@ -566,6 +599,3 @@ class VoiceListResponse(BaseModel):
 class VoiceSelectionIn(BaseModel):
     voiceId: str
     user_id: str = "demo_user"
-
-
-

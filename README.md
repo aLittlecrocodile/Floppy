@@ -1,15 +1,16 @@
 # Floppy Backend MVP
 
-工程级 MVP，覆盖 Floppy 后端与算法主链路：
+工程级 MVP，覆盖 Floppy 后端、Hermes 决策层与音频工作流：
 
 - 音频资产库：SQLite 元数据 + 本地对象存储目录，接口上可替换为 TOS/OSS/S3。
 - 用户画像：冷启动问卷 + 轻量行为画像。
-- 推荐算法：规则召回、标签匹配、向量近似、可解释重排、生成兜底。
-- 生成缓存：归一化请求、精确缓存、近似缓存、按需生成入库。
+- Hermes Agent Runtime：Hermes 选择播放/生成/混音 workflow，Floppy 本地执行。
+- Catalog 检索：approved 资源的结构化过滤查询；用户意图识别由 Hermes Skill 完成。
+- 生成缓存：按需生成入库，避免重复生成。
 - 音频生成：本地 deterministic WAV provider，用于验证工程链路；后续替换真实 TTS/音乐 provider。
 - 睡前脚本：生成带 MiniMax `<#x#>` 停顿标记的故事、冥想、ASMR 脚本，并入库保存 hash。
 - Provider 抽象：默认本地 provider，可通过环境变量切换 MiniMax T2A skeleton。
-- 事件闭环：播放、反馈、生成事件入库，为推荐优化提供数据。
+- 事件记录：播放、反馈、生成事件入库，供后续体验分析使用。
 
 ## Run
 
@@ -19,19 +20,13 @@ source .venv/bin/activate
 pip install -e ".[dev]"
 ```
 
-默认 Agent runtime 是 Hermes，需要先启动 Hermes Agent API Server：
+Agent runtime 固定为 Hermes，需要先启动 Hermes Agent API Server：
 
 ```bash
 export FLOPPY_AGENT_RUNTIME=hermes
 export FLOPPY_HERMES_BASE_URL=http://127.0.0.1:8642
 export FLOPPY_HERMES_API_KEY=change-me-local-dev
 uvicorn floppy_backend.main:app --reload
-```
-
-如果只想本地开发、不依赖 Hermes，可显式切回 LangGraph fallback：
-
-```bash
-FLOPPY_AGENT_RUNTIME=local uvicorn floppy_backend.main:app --reload
 ```
 
 健康检查：
@@ -63,10 +58,10 @@ curl -X PUT http://127.0.0.1:8000/users/u_demo/profile \
   }'
 ```
 
-获取推荐：
+查询资源目录：
 
 ```bash
-curl "http://127.0.0.1:8000/users/u_demo/recommendations?limit=3"
+curl http://127.0.0.1:8000/assets/facets
 ```
 
 请求生成或命中缓存：
@@ -77,7 +72,7 @@ curl -X POST http://127.0.0.1:8000/users/u_demo/generate-audio \
   -d '{"request_text":"我想听一个温柔女声讲海边书店的睡前故事，背景有轻微雨声，15分钟"}'
 ```
 
-工程推荐的生成任务接口：
+异步生成任务接口：
 
 ```bash
 curl -X POST http://127.0.0.1:8000/users/u_demo/generation-jobs \
@@ -164,19 +159,18 @@ export FLOPPY_MINIMAX_ENABLE_MUSIC_MIX=true
 
 - `floppy_backend.repositories`：数据访问。
 - `floppy_backend.services.profile`：用户画像。
-- `floppy_backend.services.recommendation`：推荐召回和排序。
+- `floppy_backend.services.asset_catalog`：approved 资源目录结构化过滤执行层，不做用户意图识别。
 - `floppy_backend.services.generation`：缓存命中、生成任务、入库。
 - `floppy_backend.services.script`：睡前脚本生成、停顿标记和脚本 hash。
-- `floppy_backend.services.agent_runtime`：Agent runtime 统一入口，默认装配 Hermes。
+- `floppy_backend.services.agent_runtime`：Agent runtime 统一入口，装配 Hermes。
 - `floppy_backend.services.hermes_agent`：Hermes 决策适配器，Floppy 本地执行 workflow。
-- `floppy_backend.services.agent_graph`：可选本地 LangGraph fallback。
 - `floppy_backend.providers.audio`：音频生成 provider 抽象。
 
 真实生产替换点：
 
 - `LocalAudioProvider` -> 火山/其它 TTS 和音频生成服务。
 - `LocalFileStorage` -> TOS/OSS/S3 + CDN + 签名 URL。
-- SQLite vector cosine -> pgvector / VikingDB / Milvus / Qdrant。
+- SQLite catalog search -> 独立资源索引 / VikingDB / Milvus / Qdrant。
 - in-process generation -> Celery/RQ/云队列异步 worker。
 
 当前 `/generate-audio` 为了本地端到端验证采用同步生成，但数据模型已经保留 `generation_jobs`。接真实 TTS 后应改为：

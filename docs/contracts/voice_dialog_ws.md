@@ -1,6 +1,6 @@
 # 实时语音对话 WebSocket 接口（前端对接）
 
-Floppy 智能体的**实时语音对话**接口。一条 WebSocket 连接承载全双工：客户端上行麦克风音频，服务端下行「识别文本 + 助手文本 + 合成语音」。边说边识别、边回边播，支持说话打断（barge-in）。
+Floppy 智能体的**实时语音对话**接口。一条 WebSocket 连接承载全双工：客户端上行麦克风音频，服务端下行「识别文本 + 助手文本 + 合成语音 + 可播放音频资产」。ASR 定稿后先由 Hermes `floppy-voice-dialog` 判断是聊天、追问，还是进入助眠音频 workflow。
 
 > 后端部署、环境变量、联调脚本、安全须知见 [`voice_dialog_ws_backend.md`](./voice_dialog_ws_backend.md)。本文档只讲前端怎么对接。
 
@@ -68,6 +68,27 @@ ws(s)://<host>/voice/ws?user_id=<user_id>&token=<token>&voice_style=<style>
 }
 {"type": "turn_end", "session_id": "vs_abc", "turn_id": "turn_0001", "seq": 8, "text": null, "is_final": true}
 {"type": "error", "session_id": "vs_abc", "turn_id": null, "seq": 9, "text": "<错误信息>", "is_final": false}
+{
+  "type": "audio_asset",
+  "session_id": "vs_abc",
+  "turn_id": "turn_0001",
+  "seq": 8,
+  "text": "夜雨轻敲",
+  "url": "http://host/audio/real/white_noise/01.mp3",
+  "audio_type": "white_noise",
+  "asset_id": "aud_xxx",
+  "is_final": false
+}
+{
+  "type": "audio_job",
+  "session_id": "vs_abc",
+  "turn_id": "turn_0001",
+  "seq": 8,
+  "job_id": "job_xxx",
+  "job_status": "queued",
+  "audio_type": "story",
+  "is_final": false
+}
 ```
 
 字段说明：
@@ -78,6 +99,8 @@ ws(s)://<host>/voice/ws?user_id=<user_id>&token=<token>&voice_style=<style>
 - `user_text.text` 是**累计文本**，不是 delta——前端展示识别字幕时直接用最新值覆盖，不要拼接。
 - `user_text.is_final=true` 表示这句识别定稿（此时服务端开始生成回复）。
 - `assistant_text` 与该句对应的音频二进制帧大致同时到达，用于字幕；只想播声音可忽略它。
+- `audio_asset` 表示 Hermes 判断用户明确要听音频，并已通过 sleep-audio workflow 找到可播放资产；前端应播放 `url` 对应的助眠音频。
+- `audio_job` 表示明确音频请求已创建生成任务，但音频尚未完成；前端可用 `job_id` 轮询 `GET /generation-jobs/{job_id}`。
 
 ## 一轮对话的事件时序
 
@@ -85,8 +108,9 @@ ws(s)://<host>/voice/ws?user_id=<user_id>&token=<token>&voice_style=<style>
 [上行] 持续推 PCM 帧 ...
 [下行] user_text(is_final:false) × N        ← 实时识别字幕（覆盖更新）
 [下行] user_text(is_final:true)             ← 识别定稿，触发回复
-[下行] assistant_text("第一句") + 二进制音频帧 ← 边生成边合成边下发
-[下行] assistant_text("第二句") + 二进制音频帧
+[下行] assistant_text("好的，我给你找一段雨声") + 二进制音频帧
+[下行] audio_asset(url=".../rain.mp3")      ← 命中可播放资产时出现
+      或 audio_job(job_id="job_xxx")        ← 需要生成时出现
 [下行] turn_end                             ← 本轮播报结束
 （用户再次说话 → 重复；说话中打断会取消上一轮）
 [上行] {"type":"stop"}                       ← 结束会话
@@ -115,6 +139,8 @@ ws.onText(json):
     "session_started": rememberSession(json.session_id)
     "user_text":      subtitleUser.set(json.text)  // 覆盖更新
     "assistant_text": subtitleBot.append(json.text)
+    "audio_asset":    sleepAudioPlayer.play(json.url)
+    "audio_job":      pollGenerationJob(json.job_id)
     "turn_end":       markTurnDone()
     "error":          showError(json.text)
 ```

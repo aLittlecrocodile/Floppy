@@ -1,7 +1,7 @@
 """Remix service: mix voice + ambient audio into a single output.
 
 Triggered by user edit requests in conversation ("加点雨声背景", "背景音小一点").
-NOT triggered by recommendation score thresholds.
+NOT triggered by catalog search scores.
 Does NOT consume TTS generation quota.
 Supports WAV native mixing and ffmpeg for mp3 foreground.
 """
@@ -31,15 +31,15 @@ class RemixError(RuntimeError):
 _SOUND_TYPE_TAGS: dict[str, list[str]] = {
     "rain": ["rain"],
     "ocean": ["ocean"],
-    "stream": ["nature"],
-    "fire": ["ambient"],
-    "forest": ["nature"],
-    "fan": ["ambient"],
-    "piano": ["ambient", "minimal_voice"],
+    "stream": ["stream"],
+    "fire": ["fire"],
+    "forest": ["forest"],
+    "fan": ["fan"],
+    "piano": ["piano"],
     "cello": ["ambient", "slow_pace"],
     "strings": ["ambient", "slow_pace"],
-    "flute": ["ambient", "minimal_voice"],
-    "guitar": ["ambient", "minimal_voice"],
+    "flute": ["flute"],
+    "guitar": ["ambient", "slow_pace"],
     "guzheng": ["nature", "ambient"],
 }
 _MUSIC_SOUND_TYPES = {"piano", "cello", "strings", "flute", "guitar", "guzheng"}

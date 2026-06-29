@@ -1,9 +1,9 @@
 """LLM script writer — turns a GenerationDirective's outline into a full
 sleep-audio script (with MiniMax <#秒#> pause marks).
 
-Second LLM step in the "agent commands workflow" flow: DirectivePlanner picks
-the要点, this writes the成稿. Reuses the OpenAI-compatible endpoint. Any failure
-returns None so SleepScriptService falls back to templates.
+Hermes picks the要点, this writes the成稿. Reuses the OpenAI-compatible
+endpoint. Any failure returns None so SleepScriptService falls back to
+templates.
 """
 
 from __future__ import annotations

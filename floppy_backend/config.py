@@ -1,4 +1,5 @@
 from functools import lru_cache
+import os
 from pathlib import Path
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -33,35 +34,27 @@ class Settings(BaseSettings):
     minimax_enable_music_mix: bool = False
     minimax_voice_mix_volume: float = 1.0
     minimax_music_mix_volume: float = 0.18
-    asset_hit_threshold: float = 0.58
     enforce_generation_budget: bool = False  # 关闭后不限制每日生成次数/字数（开发/预热用）
     daily_char_budget: int = 200_000
     daily_generate_count: int = 10
-    query_planner: str = "rule"  # "rule" | "ai"
-    query_planner_confidence_threshold: float = 0.6
-    query_planner_api_key: str | None = None
-    query_planner_base_url: str = "https://api.openai.com/v1"
-    query_planner_model: str = "DeepSeek-V4-Flash"
-    query_planner_timeout_sec: float = 8.0
-    query_planner_max_tokens: int = 5000
+    # Shared OpenAI-compatible LLM config for lightweight text generation
+    # around the Hermes runtime (chat replies and script writing).
+    llm_api_key: str | None = None
+    llm_base_url: str = "https://api.openai.com/v1"
+    llm_model: str = "DeepSeek-V4-Flash"
+    llm_timeout_sec: float = 8.0
 
-    # Agent runtime. Hermes is the primary decision runtime; "local" keeps the
-    # in-process LangGraph router for dev fallback and comparison.
-    agent_runtime: str = "hermes"  # "hermes" | "local"
+    # Agent runtime. Hermes is the only supported decision runtime.
+    agent_runtime: str = "hermes"
     hermes_base_url: str = "http://127.0.0.1:8642"
     hermes_api_key: str | None = None
     hermes_model: str = "DeepSeek-V4-Flash"
     hermes_timeout_sec: float = 30.0
     hermes_store_conversation: bool = True
-    hermes_fallback_to_local: bool = False
 
-    # Directive planner + LLM script writer (agent "thinks first" before
-    # commanding the generation workflow). Reuses query_planner_* creds unless
-    # overridden. Disabled (templates only) when no api_key is resolvable.
-    directive_planner_enabled: bool = True
-    directive_planner_confidence_threshold: float = 0.5
-    directive_planner_timeout_sec: float = 12.0
-    directive_planner_max_tokens: int = 1200
+    # LLM script writer. Hermes supplies the directive; Floppy may turn it into
+    # a voice script for spoken content. Disabled (templates only) when no key
+    # is resolvable.
     script_writer_timeout_sec: float = 20.0
     script_writer_max_tokens: int = 2000
 
@@ -76,7 +69,7 @@ class Settings(BaseSettings):
     volc_asr_resource_id: str = "volc.bigasr.sauc.duration"
     volc_asr_ws_url: str = "wss://openspeech.bytedance.com/api/v3/sauc/bigmodel_async"
     volc_asr_sample_rate: int = 16000
-    # Dialog LLM (reuses query_planner_* base_url/key/model unless overridden)
+    # Dialog LLM (reuses LLM base_url/key/model unless overridden)
     dialog_llm_api_key: str | None = None
     dialog_llm_base_url: str | None = None
     dialog_llm_model: str | None = None
@@ -98,9 +91,33 @@ class Settings(BaseSettings):
     # /voice/ws shared-secret (PoC auth; replace with platform auth in prod)
     voice_ws_token: str | None = None
 
-    model_config = SettingsConfigDict(env_prefix="FLOPPY_", env_file=".env")
+    model_config = SettingsConfigDict(env_prefix="FLOPPY_", env_file=".env", extra="ignore")
 
 
 @lru_cache
 def get_settings() -> Settings:
     return Settings()
+
+
+def legacy_llm_api_key() -> str | None:
+    return _legacy_env_value("FLOPPY_QUERY_PLANNER_API_KEY")
+
+
+def _legacy_env_value(name: str) -> str | None:
+    value = os.environ.get(name)
+    if value:
+        return value
+    if os.environ.get("FLOPPY_DISABLE_LEGACY_ENV_FILE") == "1":
+        return None
+    env_path = Path(".env")
+    if not env_path.exists():
+        return None
+    for line in env_path.read_text(encoding="utf-8").splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or "=" not in stripped:
+            continue
+        key, raw_value = stripped.split("=", 1)
+        if key.strip() == name:
+            value = raw_value.strip().strip("\"'")
+            return value or None
+    return None

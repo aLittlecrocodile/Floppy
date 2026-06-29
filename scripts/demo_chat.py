@@ -23,7 +23,7 @@ def main() -> int:
         return 2
 
     settings = get_settings()
-    print(f"AI planner={settings.query_planner}:{settings.query_planner_model}")
+    print(f"agent_runtime={settings.agent_runtime}:{settings.hermes_model}")
     print(f"audio_provider={settings.audio_provider}:{settings.minimax_model if settings.audio_provider == 'minimax' else 'local'}")
 
     with TestClient(app, raise_server_exceptions=False) as client:

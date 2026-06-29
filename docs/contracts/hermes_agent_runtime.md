@@ -9,7 +9,9 @@ Hermes Agent is used as the agent decision runtime:
 ```text
 App / Voice WS / Demo
   -> Floppy /agent runtime
-    -> Hermes Agent API Server decides selected skill
+    -> Hermes plans structured catalog search
+    -> Floppy executes deterministic resource tools
+    -> Hermes decides selected workflow skill
     -> Floppy executes play_asset / generate_sleep_audio / remix_current
 ```
 
@@ -17,29 +19,16 @@ This avoids binding product workflow state to Hermes internals while replacing t
 
 ## Runtime Switch
 
-Default Hermes runtime:
+Hermes is the only supported agent runtime:
 
 ```bash
 FLOPPY_AGENT_RUNTIME=hermes
 FLOPPY_HERMES_BASE_URL=http://127.0.0.1:8642
 FLOPPY_HERMES_API_KEY=change-me-local-dev
 FLOPPY_HERMES_MODEL=DeepSeek-V4-Flash
-FLOPPY_HERMES_FALLBACK_TO_LOCAL=false
 ```
 
-Local LangGraph fallback for development:
-
-```bash
-FLOPPY_AGENT_RUNTIME=local
-```
-
-Optional Hermes-to-local fallback:
-
-```bash
-FLOPPY_HERMES_FALLBACK_TO_LOCAL=true
-```
-
-When `FLOPPY_HERMES_FALLBACK_TO_LOCAL=true`, Hermes errors are converted into a local LangGraph decision. The response `planner_meta.fallback_reason` starts with `hermes_unavailable:`.
+`FLOPPY_AGENT_RUNTIME=local` is no longer supported. Old local fallback env vars are ignored by settings compatibility, but the runtime factory will reject non-Hermes runtimes.
 
 ## Hermes Setup
 
@@ -63,9 +52,35 @@ Floppy sends:
 - `X-Hermes-Session-Id: floppy-agent:<user_id>`
 - `X-Hermes-Session-Key: floppy:user:<user_id>`
 
+## Search Plan Contract
+
+Hermes first translates user wording into a structured catalog search plan:
+
+```json
+{
+  "query": "雨声",
+  "filters": {
+    "type": "white_noise",
+    "mood_tags": [],
+    "required_tags": ["rain", "no_voice"],
+    "preferred_tags": ["ambient", "low_stimulation"],
+    "negative_tags": ["thunder", "voice_present", "meditation"],
+    "min_duration_sec": null,
+    "max_duration_sec": null
+  },
+  "limit": 10,
+  "reasons": ["用户要非人声雨声，且排除雷声"],
+  "confidence": 0.95
+}
+```
+
+The backend catalog does not translate Chinese phrases into tags. It only
+executes `type`, `required_tags`, `preferred_tags`, `negative_tags`, `mood_tags`,
+and duration filters.
+
 ## Decision Contract
 
-Hermes must return one JSON object:
+After Floppy executes the search plan, Hermes returns one workflow JSON object:
 
 ```json
 {
@@ -142,16 +157,41 @@ Example tool trace:
 
 ## Current Boundary
 
-This migration stage uses Hermes as an HTTP decision runtime. Floppy still executes tools locally after Hermes returns the selected action.
+This migration stage uses Hermes as an HTTP Skill runtime with two structured
+calls:
 
-The next stage can expose Floppy workflows as an MCP server and let Hermes call:
+1. Hermes produces the catalog search plan.
+2. Floppy executes the resource search tool locally.
+3. Hermes selects the workflow action.
 
+This keeps user intent logic in Hermes while Floppy keeps quota, storage, safety,
+and job enforcement. Floppy still executes tools locally after Hermes returns the
+selected action.
+
+The standard Hermes target is:
+
+```text
+Hermes Skill: floppy-sleep-audio
+  -> Hermes MCP toolset: mcp-floppy
+    -> Floppy backend APIs
+      -> asset search / generation jobs / remix jobs / storage / quotas
+```
+
+The Skill owns product policy and tool-use procedure. The MCP server exposes resource and workflow tools. Floppy backend APIs remain the enforcement boundary for quotas, safety, storage URLs, and asynchronous job state.
+
+The next stage lets Hermes call:
+
+- `mcp_floppy_get_user_profile_context`
+- `mcp_floppy_list_audio_asset_facets`
+- `mcp_floppy_search_audio_assets`
 - `mcp_floppy_search_audio_asset`
+- `mcp_floppy_get_audio_asset`
 - `mcp_floppy_generate_sleep_audio`
 - `mcp_floppy_remix_current`
 - `mcp_floppy_get_generation_job`
+- `mcp_floppy_get_remix_job`
 
-That MCP server is already scaffolded as an optional entry point.
+That MCP server is scaffolded as an optional entry point. The repository also includes a Hermes Skill at `hermes/skills/floppy/floppy-sleep-audio/SKILL.md`.
 
 ## Optional Floppy MCP Server
 
@@ -174,19 +214,45 @@ mcp_servers:
       FLOPPY_MCP_BACKEND_URL: "http://127.0.0.1:8000"
     tools:
       include:
-        - search_audio_asset
+        - get_user_profile_context
+        - list_audio_asset_facets
+        - search_audio_assets
+        - get_audio_asset
         - generate_sleep_audio
         - get_generation_job
         - remix_current
+        - get_remix_job
+      resources: false
+      prompts: false
 ```
 
 Hermes registers MCP tool names with a server prefix:
 
 ```text
-mcp_floppy_search_audio_asset
+mcp_floppy_get_user_profile_context
+mcp_floppy_list_audio_asset_facets
+mcp_floppy_search_audio_assets
+mcp_floppy_get_audio_asset
 mcp_floppy_generate_sleep_audio
 mcp_floppy_get_generation_job
 mcp_floppy_remix_current
+mcp_floppy_get_remix_job
 ```
 
-The current `FLOPPY_AGENT_RUNTIME=hermes` path does not require MCP. It calls Hermes for a structured decision, then executes the selected Floppy workflow in-process. MCP is the next step when we want Hermes to perform tool calls directly.
+The current Hermes adapter path does not require direct MCP tool calling. It
+uses the same Skill/tool contracts, asks Hermes for structured plans and
+decisions, then executes the selected Floppy workflow in-process. Direct Hermes
+MCP tool calling is the next step when the gateway is wired to invoke the MCP
+server itself.
+
+## Hermes Skill Registration
+
+Expose this repository's skill directory through Hermes config:
+
+```yaml
+skills:
+  external_dirs:
+    - /path/to/Floppy/hermes/skills
+```
+
+Hermes will discover the `floppy-sleep-audio` skill and load it on demand. The skill tells Hermes to read profile context, inspect catalog facets when needed, search assets before ordinary playback, generate only when appropriate, and keep all execution through Floppy MCP tools.
