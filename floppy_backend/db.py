@@ -48,6 +48,7 @@ CREATE TABLE IF NOT EXISTS audio_assets (
     quality_score REAL NOT NULL,
     embedding TEXT NOT NULL,
     created_by TEXT NOT NULL,
+    tier TEXT NOT NULL DEFAULT 'community',
     created_at TEXT NOT NULL
 );
 
@@ -225,6 +226,18 @@ def _migrate(conn: sqlite3.Connection) -> None:
     asset_cols = {row["name"] for row in conn.execute("PRAGMA table_info(audio_assets)").fetchall()}
     if "tags" not in asset_cols:
         conn.execute("ALTER TABLE audio_assets ADD COLUMN tags TEXT NOT NULL DEFAULT '[]'")
+    if "tier" not in asset_cols:
+        conn.execute("ALTER TABLE audio_assets ADD COLUMN tier TEXT NOT NULL DEFAULT 'community'")
+        # One-time backfill: real recordings and official prewarm generations
+        # are the curated pool; everything else is community.
+        conn.execute(
+            """UPDATE audio_assets SET tier = 'curated'
+               WHERE created_by = 'real_asset'
+                  OR object_key LIKE 'ondemand/prewarm_user/%'"""
+        )
+    # Index lives here (not in SCHEMA): on a pre-tier database the SCHEMA
+    # script would try to index a column that doesn't exist yet.
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_audio_assets_tier ON audio_assets(tier)")
 
     remix_cols = {row["name"] for row in conn.execute("PRAGMA table_info(remix_jobs)").fetchall()}
     remix_additions = {

@@ -57,10 +57,3 @@ def normalize(vector: Iterable[float]) -> list[float]:
         return values
     return [item / norm for item in values]
 
-
-def cosine_similarity(left: Iterable[float], right: Iterable[float]) -> float:
-    left_values = list(left)
-    right_values = list(right)
-    if not left_values or not right_values or len(left_values) != len(right_values):
-        return 0.0
-    return sum(a * b for a, b in zip(left_values, right_values, strict=True))

@@ -278,70 +278,82 @@ class TestDynamicAvailableTags:
         assert "rain" in result.preferred_tags
 
 
-class TestPlannerObservability:
-    def test_planner_meta_in_agent_decide(self, tmp_path, monkeypatch):
+class TestHermesDecisionLayer:
+    """Hermes is now the sole decision layer; the runtime must survive both a
+    working Hermes (autonomous asset pick) and an unreachable one (degraded
+    no_match), without any local rule fallback."""
+
+    def test_hermes_pick_and_degraded_fallback(self, tmp_path, monkeypatch):
         from floppy_backend.config import get_settings
         from floppy_backend.main import app, state
+        from floppy_backend.services.hermes_agent import HermesDecision
         from fastapi.testclient import TestClient
 
         monkeypatch.setenv("FLOPPY_DATABASE_PATH", str(tmp_path / "floppy.db"))
         monkeypatch.setenv("FLOPPY_STORAGE_DIR", str(tmp_path / "audio"))
         get_settings.cache_clear()
 
+        profile_payload = {
+            "audio_type_preferences": ["meditation"],
+            "voice_preferences": ["warm_female"],
+            "background_preferences": ["rain_soft"],
+            "duration_preference_min": 15,
+            "stress_level": "high",
+            "anxiety_level": "high",
+            "avg_sleep_latency_min": 40,
+            "mood_tags": ["anxiety_relief"],
+        }
+
+        class StubClient:
+            def __init__(self, decision=None, exc=None):
+                self.decision = decision
+                self.exc = exc
+
+            def decide(self, **kwargs):
+                if self.exc:
+                    raise self.exc
+                return self.decision
+
         with TestClient(app) as client:
-            assert client.post("/admin/seed").status_code == 200
-            profile_payload = {
-                "audio_type_preferences": ["meditation"],
-                "voice_preferences": ["warm_female"],
-                "background_preferences": ["rain_soft"],
-                "duration_preference_min": 15,
-                "stress_level": "high",
-                "anxiety_level": "high",
-                "avg_sleep_latency_min": 40,
-                "mood_tags": ["anxiety_relief"],
-            }
             assert client.put("/users/u_obs/profile", json=profile_payload).status_code == 200
 
+            # Seed one catalog asset directly (file-backed seeding needs real
+            # audio sources that aren't present in the tmp test env).
+            from floppy_backend.models import AudioAssetIn, AudioType
+            state.repository.upsert_asset(
+                AudioAssetIn(
+                    type=AudioType.MEDITATION,
+                    title="呼吸冥想·测试",
+                    object_key="ondemand/test/breath.mp3",
+                    duration_sec=600,
+                    voice_id="warm_female",
+                    prompt_hash="test-prompt-hash",
+                    content_hash="test-content-hash",
+                    mood_tags=["calm"],
+                    tags=["meditation", "rain"],
+                    user_segment_tags=["anxiety_relief"],
+                    quality_score=0.9,
+                    embedding=[0.0] * 32,
+                    created_by="ondemand",
+                )
+            )
+
+            # Hermes autonomously picks an asset — no score threshold gate.
+            asset = state.agent_runtime._catalog_candidates()[0]
+            state.agent_runtime._client = StubClient(
+                decision=HermesDecision(action="play_asset", asset_id=asset.id, reasons=["测试"], confidence=0.9)
+            )
             resp = client.post("/agent/decide", json={"user_id": "u_obs", "request_text": "呼吸冥想引导放松压力释放"})
             assert resp.status_code == 200
             body = resp.json()
-            assert "planner_meta" in body
-            meta = body["planner_meta"]
-            assert meta["planner_source"] == "rule"
-            assert meta["planner_confidence"] == 1.0
-            assert meta["planner_latency_ms"] >= 0
+            assert body["action"] == "play_asset"
+            assert body["asset"]["id"] == asset.id
+            assert body["planner_meta"]["planner_source"] == "hermes"
 
-    def test_planner_meta_shows_fallback(self, tmp_path, monkeypatch):
-        from floppy_backend.config import get_settings
-        from floppy_backend.main import app, state
-        from fastapi.testclient import TestClient
-
-        monkeypatch.setenv("FLOPPY_DATABASE_PATH", str(tmp_path / "floppy.db"))
-        monkeypatch.setenv("FLOPPY_STORAGE_DIR", str(tmp_path / "audio"))
-        get_settings.cache_clear()
-
-        class FailPlanner:
-            def plan(self, *args, **kwargs):
-                raise RuntimeError("timeout")
-
-        with TestClient(app) as client:
-            assert client.post("/admin/seed").status_code == 200
-            state.agent_graph._planner = FailPlanner()
-
-            profile_payload = {
-                "audio_type_preferences": ["meditation"],
-                "voice_preferences": ["warm_female"],
-                "background_preferences": ["rain_soft"],
-                "duration_preference_min": 15,
-                "stress_level": "high",
-                "anxiety_level": "high",
-                "avg_sleep_latency_min": 40,
-                "mood_tags": ["anxiety_relief"],
-            }
-            assert client.put("/users/u_obs2/profile", json=profile_payload).status_code == 200
-
-            resp = client.post("/agent/decide", json={"user_id": "u_obs2", "request_text": "呼吸冥想引导放松压力释放"})
+            # Hermes unreachable → degraded no_match with fallback_reason.
+            state.agent_runtime._client = StubClient(exc=RuntimeError("connection refused"))
+            resp = client.post("/agent/decide", json={"user_id": "u_obs", "request_text": "来一段海边篝火白噪音"})
             assert resp.status_code == 200
-            meta = resp.json()["planner_meta"]
-            assert meta["planner_source"] == "ai_fallback"
-            assert "ai_unavailable" in meta["fallback_reason"]
+            body = resp.json()
+            assert body["action"] == "no_match"
+            assert "hermes_unavailable" in body["planner_meta"]["fallback_reason"]

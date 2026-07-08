@@ -334,10 +334,19 @@ class MiniMaxTTSProvider(AudioGenerationProvider):
         output_path.parent.mkdir(parents=True, exist_ok=True)
         output_path.write_bytes(audio_bytes)
         usage_characters = task.usage_characters or len(script_text)
+        # Async responses don't carry audio_length — probe the real duration
+        # instead of estimating from text (long content is exactly this path,
+        # and Hermes matches on duration).
+        duration_sec = self._estimate_duration_from_text(script_text)
+        try:
+            from floppy_backend.services.minimax_hubless import probe_audio
+            duration_sec = int(probe_audio(output_path).duration_sec) or duration_sec
+        except Exception:  # noqa: BLE001 — ffprobe missing/unreadable file: keep estimate
+            pass
         return GeneratedAudio(
             object_key=object_key,
             path=output_path,
-            duration_sec=max(1, self._estimate_duration_from_text(script_text)),
+            duration_sec=max(1, duration_sec),
             title=title or self._title(normalized),
             content_hash=sha256_text(output_path.read_bytes().hex()),
             provider_model=self.settings.minimax_model,
@@ -486,6 +495,11 @@ class MiniMaxTTSProvider(AudioGenerationProvider):
             "audio_setting": build_audio_setting(self.settings),
         }
 
+    # Transient failures worth one retry: rate limit, server errors, network blips.
+    # Generation calls are idempotent (same text → same audio), so retrying is safe.
+    _RETRYABLE_STATUS = {429, 500, 502, 503, 504}
+    _RETRY_DELAY_SEC = 2.0
+
     def _post_json(self, path: str, payload: dict, timeout: float = 60) -> dict:
         url = f"{self.settings.minimax_base_url.rstrip('/')}{path}"
         request = urllib.request.Request(
@@ -497,17 +511,25 @@ class MiniMaxTTSProvider(AudioGenerationProvider):
             },
             method="POST",
         )
-        try:
-            with urllib.request.urlopen(request, timeout=timeout) as response:
-                return json.loads(response.read().decode("utf-8"))
-        except urllib.error.HTTPError as exc:
-            detail = exc.read().decode("utf-8", errors="replace")
-            msg = f"MiniMax HTTP {exc.code}: {detail}"
-            if exc.code == 401 and "minimax.io" in self.settings.minimax_base_url:
-                msg += " (hint: Chinese-account keys require FLOPPY_MINIMAX_BASE_URL=https://api.minimaxi.com)"
-            raise ProviderAPIError(msg, status_code=exc.code) from exc
-        except urllib.error.URLError as exc:
-            raise ProviderAPIError(f"MiniMax request failed: {exc.reason}") from exc
+        for attempt in (1, 2):
+            try:
+                with urllib.request.urlopen(request, timeout=timeout) as response:
+                    return json.loads(response.read().decode("utf-8"))
+            except urllib.error.HTTPError as exc:
+                if attempt == 1 and exc.code in self._RETRYABLE_STATUS:
+                    time.sleep(self._RETRY_DELAY_SEC)
+                    continue
+                detail = exc.read().decode("utf-8", errors="replace")
+                msg = f"MiniMax HTTP {exc.code}: {detail}"
+                if exc.code == 401 and "minimax.io" in self.settings.minimax_base_url:
+                    msg += " (hint: Chinese-account keys require FLOPPY_MINIMAX_BASE_URL=https://api.minimaxi.com)"
+                raise ProviderAPIError(msg, status_code=exc.code) from exc
+            except urllib.error.URLError as exc:
+                if attempt == 1:
+                    time.sleep(self._RETRY_DELAY_SEC)
+                    continue
+                raise ProviderAPIError(f"MiniMax request failed: {exc.reason}") from exc
+        raise ProviderAPIError("MiniMax request failed after retry")  # unreachable
 
     def _get_json(self, path: str, params: dict[str, str]) -> dict:
         raw = urllib.parse.urlencode(params)

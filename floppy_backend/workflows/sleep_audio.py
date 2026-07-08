@@ -29,6 +29,39 @@ from floppy_backend.workflows.contracts import (
 )
 
 
+# Generations by these users are official prewarm content → curated tier.
+# Also keeps prewarm re-runs from flipping curated back to community on upsert.
+CURATED_GENERATION_USERS = {"prewarm_user"}
+
+# 中英句读 + 逗号：标题在第一处截断
+_TITLE_BREAK_CHARS = "，。,.;；!！?？:：\n"
+
+_TITLE_FALLBACK_BY_INTENT = {
+    "story": "睡前故事",
+    "meditation": "冥想引导",
+    "white_noise": "白噪音",
+    "music": "助眠音乐",
+    "asmr": "轻声细语",
+    "podcast_digest": "睡前播客",
+}
+
+
+def _clean_title(raw: str | None, intent: str) -> str:
+    """Card-worthy title: cut at first sentence punctuation, cap at 14 chars,
+    strip trailing punctuation; fall back to a type label when nothing usable
+    remains (prevents raw prompts like "用平和声音讲几条科技短讯，低信息密度"
+    from becoming Home titles)."""
+    text = (raw or "").strip()
+    for idx, char in enumerate(text):
+        if char in _TITLE_BREAK_CHARS:
+            text = text[:idx]
+            break
+    text = text[:14].rstrip("".join(_TITLE_BREAK_CHARS) + " 、的")
+    if len(text) < 2:
+        return _TITLE_FALLBACK_BY_INTENT.get(intent, "助眠音频")
+    return text
+
+
 @dataclass(frozen=True)
 class SleepAudioWorkflowResult:
     asset: AudioAsset
@@ -109,7 +142,9 @@ class SleepAudioWorkflowService:
         request = self.build_request(user_id=user_id, cache_key=cache_key, normalized=normalized, profile=profile, title_hint=script.title)
         started = time.perf_counter()
         generated = self._generate_audio(user_id=user_id, cache_key=cache_key, normalized=normalized, request=request, script=script)
-        asset = self._upsert_asset(user_id=user_id, cache_key=cache_key, normalized=normalized, profile=profile, generated=generated)
+        asset = self._upsert_asset(
+            user_id=user_id, cache_key=cache_key, normalized=normalized, profile=profile, generated=generated, directive=directive
+        )
         latency_ms = int((time.perf_counter() - started) * 1000)
         status = self._status_response(request=request, normalized=normalized, script=script, generated=generated, asset=asset)
         generated = self._attach_workflow_payload(generated, status)
@@ -207,11 +242,14 @@ class SleepAudioWorkflowService:
         normalized: NormalizedAudioRequest,
         profile: UserProfile | None,
         generated: GeneratedAudio,
+        directive: GenerationDirective | None = None,
     ) -> AudioAsset:
+        key_elements = list(directive.key_elements) if directive and directive.key_elements else []
+        tags = ["generated", *(key_elements[:4] or normalized.content_topic[:3])]
         asset = self.repository.upsert_asset(
             AudioAssetIn(
                 type=normalized.intent,
-                title=generated.title,
+                title=_clean_title(generated.title, normalized.intent.value),
                 object_key=generated.object_key,
                 duration_sec=generated.duration_sec,
                 language=normalized.language,
@@ -219,6 +257,7 @@ class SleepAudioWorkflowService:
                 prompt_hash=cache_key,
                 content_hash=generated.content_hash,
                 mood_tags=normalized.mood,
+                tags=list(dict.fromkeys(tags)),
                 user_segment_tags=[profile.segment if profile else "balanced_sleep"],
                 quality_score=0.72,
                 embedding=text_embedding(
@@ -233,6 +272,7 @@ class SleepAudioWorkflowService:
                     )
                 ),
                 created_by="ondemand",
+                tier="curated" if user_id in CURATED_GENERATION_USERS else "community",
             )
         )
         asset.playback_url = self.storage.public_url(asset.object_key)

@@ -16,20 +16,21 @@ def build_sleep_audio_cache_key(
     provider_name: str,
     settings: Settings | None = None,
     directive=None,  # noqa: ANN001 — accepted for call-site compat; intentionally NOT hashed
+    request_text: str | None = None,
 ) -> str:
     """Return a generation cache key that changes when production policy changes.
 
-    The key is driven by the *normalized user request* (intent/duration/voice/
-    background/mood/topic) — i.e. "what the user asked for" — NOT by the
-    directive. The directive is an LLM artifact whose wording drifts run to run;
-    folding it in would make the same need miss its own cache. So a repeat of
-    the same request re-hits the cached audio, while a genuinely different
-    request (different normalized fields) regenerates. The `directive` param is
-    accepted only so callers don't need to branch; it is deliberately ignored.
+    When `request_text` is provided it is folded into the key: the normalizer
+    is lossy (unrelated requests can normalize identically — e.g. any 12-min
+    story with no keyword topic), and cross-wording reuse is the Hermes
+    agent's job now, not the cache's. The cache only answers "have we generated
+    THIS exact request before". The `directive` param is accepted only so
+    callers don't need to branch; it is deliberately ignored (LLM wording
+    drifts run to run).
     """
     is_minimax = provider_name == "minimax_t2a"
     music_mix_enabled = bool(is_minimax and settings and settings.minimax_enable_music_mix)
-    return sha256_json(
+    base_key = sha256_json(
         {
             "normalized": normalized.model_dump(mode="json"),
             "provider": provider_name,
@@ -46,3 +47,7 @@ def build_sleep_audio_cache_key(
             "target_duration_sec": normalized.duration_sec,
         }
     )
+    if not request_text:
+        return base_key
+    # Two-level hash keeps existing keys migratable: new = f(old, request_text).
+    return sha256_json({"base_key": base_key, "request_text": request_text})

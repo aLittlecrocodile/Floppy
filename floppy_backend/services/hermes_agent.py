@@ -13,31 +13,33 @@ from floppy_backend.models import (
     AgentDecideRequest,
     AgentDecideResponse,
     AgentToolCall,
-    AssetSearchRequest,
     AssetSearchResponse,
+    AssetSearchResult,
     AudioAsset,
     EventIn,
     GenerationBudget,
     GenerationDirective,
     GenerationRequest,
+    NormalizedAudioRequest,
     PlannerMeta,
     ProfileContext,
 )
 from floppy_backend.repositories import Repository
-from floppy_backend.services.agent_graph import AgentGraphBuilder
 from floppy_backend.services.generation import GenerationService
+from floppy_backend.services.library import LibraryService
 from floppy_backend.services.normalizer import RequestNormalizer
-from floppy_backend.services.recommendation import RecommendationService
 from floppy_backend.services.remix import RemixService
 from floppy_backend.storage import LocalFileStorage
 
 
-_ACTIONS = {"play_asset", "generate_job", "remix_current", "no_match"}
+_ACTIONS = {"chat", "play_asset", "generate_job", "remix_current", "no_match"}
 _ACTION_ALIASES = {
     "generate_sleep_audio": "generate_job",
     "play_audio_asset": "play_asset",
     "search_audio_asset": "play_asset",
     "remix_audio": "remix_current",
+    "reply": "chat",
+    "talk": "chat",
 }
 
 
@@ -47,6 +49,7 @@ class HermesDecision(BaseModel):
     asset_id: str | None = None
     remix_sound_type: str | None = None
     directive: GenerationDirective | None = None
+    reply: str | None = None  # user-facing sentence, present on every action
     reasons: list[str] = Field(default_factory=list)
     confidence: float = Field(default=0.7, ge=0.0, le=1.0)
 
@@ -60,6 +63,7 @@ class HermesDecision(BaseModel):
         if self.selected_skill:
             return self.selected_skill
         return {
+            "chat": "chat",
             "play_asset": "play_asset",
             "generate_job": "generate_sleep_audio",
             "remix_current": "remix_current",
@@ -83,9 +87,9 @@ class HermesAgentClient:
         *,
         request: AgentDecideRequest,
         profile_context: ProfileContext,
-        search: AssetSearchResponse,
+        candidates: list[AudioAsset],
     ) -> HermesDecision:
-        prompt = _build_decision_prompt(request, profile_context, search)
+        prompt = _build_decision_prompt(request, profile_context, candidates)
         headers = {
             "Content-Type": "application/json",
             "X-Hermes-Session-Id": f"floppy-agent:{request.user_id}",
@@ -115,7 +119,20 @@ class HermesAgentClient:
 
 
 class HermesAgentRuntime:
-    """Agent runtime adapter: Hermes decides, Floppy executes workflows."""
+    """The decision layer: Hermes decides, Floppy executes workflows.
+
+    Matching is agent-driven — Hermes sees the (capped) asset catalog and
+    autonomously picks the asset to play; there is no scoring algorithm or
+    hit threshold gating its choice. Two deterministic guards remain:
+
+    - exact prompt_hash cache hit short-circuits before Hermes (cost control:
+      the same request never regenerates paid TTS audio);
+    - a play_asset decision must reference a real catalog asset_id, otherwise
+      it is downgraded to generate_job / no_match.
+
+    On Hermes failure the runtime degrades to no_match (with fallback_reason)
+    instead of guessing — there is no local rule-based fallback anymore.
+    """
 
     def __init__(
         self,
@@ -123,48 +140,64 @@ class HermesAgentRuntime:
         repository: Repository,
         storage: LocalFileStorage,
         normalizer: RequestNormalizer,
-        recommendation_service: RecommendationService,
         generation_service: GenerationService,
         remix_service: RemixService,
+        library: LibraryService,
         settings: Settings,
-        local_agent: AgentGraphBuilder,
+        directive_planner=None,
     ):
         self._repo = repository
         self._storage = storage
         self._normalizer = normalizer
-        self._rec = recommendation_service
         self._gen = generation_service
         self._remix = remix_service
+        self._library = library
         self._settings = settings
-        self._local_agent = local_agent
+        self._directive_planner = directive_planner
         self._client = HermesAgentClient(settings)
 
     def run(self, request: AgentDecideRequest) -> AgentDecideResponse:
         started = time.perf_counter()
-        try:
-            profile_context = self._profile_context(request.user_id)
-            normalized = self._normalizer.normalize(GenerationRequest(request_text=request.request_text), profile_context)
-            cache_key = self._gen.cache_key_for(normalized)
-            search = self._rec.search(
-                AssetSearchRequest(user_id=request.user_id, query=request.request_text, cache_key=cache_key, limit=5)
-            )
-            for result in search.results:
-                result.asset.playback_url = self._storage.public_url(result.asset.object_key)
+        profile_context = self._profile_context(request.user_id)
+        normalized = self._normalizer.normalize(
+            GenerationRequest(request_text=request.request_text), profile_context
+        )
+        cache_key = self._gen.cache_key_for(normalized, request_text=request.request_text)
 
-            decision = self._client.decide(request=request, profile_context=profile_context, search=search)
-            latency_ms = int((time.perf_counter() - started) * 1000)
-            return self._execute_decision(
-                request=request,
-                profile_context=profile_context,
-                normalized=normalized,
-                search=search,
-                decision=decision,
-                hermes_latency_ms=latency_ms,
+        # Short-circuit ONLY on a verbatim repeat of a request that already
+        # generated this asset. The cache key comes from lossy normalization —
+        # unrelated requests can collapse onto the same key (e.g. "来段脱口秀"
+        # and "生成助眠音频" both normalize to profile defaults), and those must
+        # go to Hermes, which sees the cached asset among its candidates anyway.
+        exact = self._repo.get_asset_by_prompt_hash(cache_key)
+        if exact is not None and self._repo.has_generation_request(cache_key, request.request_text):
+            return self._exact_cache_response(request, profile_context, normalized, exact)
+
+        candidates = self._catalog_candidates()
+        decision = None
+        last_exc: Exception | None = None
+        for _ in range(2):  # one retry — Hermes/LLM cold-start hiccups are transient
+            try:
+                decision = self._client.decide(request=request, profile_context=profile_context, candidates=candidates)
+                break
+            except Exception as exc:  # noqa: BLE001 — network/parse/validation errors from Hermes
+                last_exc = exc
+        if decision is None:
+            return self._degraded_response(
+                request, profile_context, normalized, candidates, last_exc,
+                int((time.perf_counter() - started) * 1000),
             )
-        except Exception as exc:
-            if not self._settings.hermes_fallback_to_local:
-                raise
-            return self._fallback(request, exc, int((time.perf_counter() - started) * 1000))
+        hermes_latency_ms = int((time.perf_counter() - started) * 1000)
+        return self._execute_decision(
+            request=request,
+            profile_context=profile_context,
+            normalized=normalized,
+            candidates=candidates,
+            decision=decision,
+            hermes_latency_ms=hermes_latency_ms,
+        )
+
+    # -- Context & candidates ---------------------------------------------
 
     def _profile_context(self, user_id: str) -> ProfileContext:
         profile = self._repo.get_profile(user_id)
@@ -179,18 +212,121 @@ class HermesAgentRuntime:
             ),
         )
 
+    def _catalog_candidates(self) -> list[AudioAsset]:
+        return self._library.agent_candidates()
+
+    def _search_view(
+        self,
+        candidates: list[AudioAsset],
+        *,
+        chosen: AudioAsset | None = None,
+        chosen_match_type: str = "hermes_selected",
+    ) -> AssetSearchResponse:
+        """Contract-compatible `search` field: the chosen asset (if any)
+        followed by catalog candidates the frontend can use as fallback
+        suggestions. Scores are no longer produced by an algorithm."""
+        results: list[AssetSearchResult] = []
+        if chosen is not None:
+            results.append(
+                AssetSearchResult(asset=chosen, score=1.0, match_type=chosen_match_type, reasons=["智能体选择"])
+            )
+        for asset in candidates:
+            if chosen is not None and asset.id == chosen.id:
+                continue
+            results.append(AssetSearchResult(asset=asset, score=0.0, match_type="catalog", reasons=["目录候选"]))
+            if len(results) >= 5:
+                break
+        return AssetSearchResponse(
+            results=results,
+            hit=chosen is not None,
+            best_score=results[0].score if results else None,
+            threshold=0.0,
+        )
+
+    # -- Responses ----------------------------------------------------------
+
+    def _exact_cache_response(
+        self,
+        request: AgentDecideRequest,
+        profile_context: ProfileContext,
+        normalized: NormalizedAudioRequest,
+        asset: AudioAsset,
+    ) -> AgentDecideResponse:
+        asset.playback_url = self._storage.public_url(asset.object_key)
+        self._repo.record_event(
+            request.user_id,
+            EventIn(event_type="recommendation_served", asset_id=asset.id, payload={"source": "exact_cache"}),
+        )
+        return AgentDecideResponse(
+            action="play_asset",
+            normalized_request=normalized,
+            profile_context=profile_context,
+            search=self._search_view([], chosen=asset, chosen_match_type="exact"),
+            asset=asset,
+            reply=f"这就给你放《{asset.title}》，晚安。",
+            reasons=["精确缓存命中，同一需求直接复用已生成音频"],
+            planner_meta=PlannerMeta(planner_source="exact_cache", planner_confidence=1.0, planner_latency_ms=0),
+            selected_skill="play_asset",
+            tool_calls=[
+                AgentToolCall(
+                    name="play_asset",
+                    status="succeeded",
+                    input={"asset_id": asset.id},
+                    output={"asset_id": asset.id, "match_type": "exact"},
+                    reason="prompt_hash exact cache hit — Hermes not consulted",
+                )
+            ],
+        )
+
+    def _degraded_response(
+        self,
+        request: AgentDecideRequest,
+        profile_context: ProfileContext,
+        normalized: NormalizedAudioRequest,
+        candidates: list[AudioAsset],
+        exc: Exception,
+        latency_ms: int,
+    ) -> AgentDecideResponse:
+        return AgentDecideResponse(
+            action="no_match",
+            normalized_request=normalized,
+            profile_context=profile_context,
+            search=self._search_view(candidates),
+            asset=None,
+            reasons=["Hermes 决策层不可用，本次请求未做匹配"],
+            planner_meta=PlannerMeta(
+                planner_source="hermes",
+                planner_confidence=0.0,
+                planner_latency_ms=latency_ms,
+                fallback_reason=f"hermes_unavailable:{type(exc).__name__}",
+            ),
+            selected_skill="no_match",
+            tool_calls=[
+                AgentToolCall(
+                    name="hermes_agent",
+                    status="failed",
+                    input={"user_id": request.user_id, "request_text": request.request_text},
+                    output={"error": str(exc)[:240]},
+                    latency_ms=latency_ms,
+                )
+            ],
+        )
+
+    # -- Decision execution --------------------------------------------------
+
     def _execute_decision(
         self,
         *,
         request: AgentDecideRequest,
         profile_context: ProfileContext,
-        normalized,
-        search: AssetSearchResponse,
+        normalized: NormalizedAudioRequest,
+        candidates: list[AudioAsset],
         decision: HermesDecision,
         hermes_latency_ms: int,
     ) -> AgentDecideResponse:
         action = decision.normalized_action()
         selected_skill = decision.skill_name()
+        extra_reasons: list[str] = []
         hermes_call = AgentToolCall(
             name="hermes_agent",
             status="succeeded",
@@ -199,10 +335,29 @@ class HermesAgentRuntime:
             latency_ms=hermes_latency_ms,
             reason="Hermes selected the Floppy workflow skill",
         )
+        planner_meta = PlannerMeta(
+            planner_source="hermes",
+            planner_confidence=decision.confidence,
+            planner_latency_ms=hermes_latency_ms,
+        )
+
+        if action == "chat":
+            return AgentDecideResponse(
+                action="chat",
+                normalized_request=normalized,
+                profile_context=profile_context,
+                search=self._search_view(candidates),
+                asset=None,
+                reply=decision.reply or "我在呢，想聊什么都可以。",
+                reasons=decision.reasons or ["Hermes 判断本轮为对话，无播放意图"],
+                planner_meta=planner_meta,
+                selected_skill="chat",
+                tool_calls=[hermes_call],
+            )
 
         if action == "play_asset":
-            asset = _select_asset(search, decision.asset_id)
-            if asset is not None and search.hit:
+            asset = _select_asset(candidates, decision.asset_id)
+            if asset is not None:
                 self._repo.record_event(
                     request.user_id,
                     EventIn(event_type="recommendation_served", asset_id=asset.id, payload={"source": "hermes"}),
@@ -211,22 +366,21 @@ class HermesAgentRuntime:
                     action="play_asset",
                     normalized_request=normalized,
                     profile_context=profile_context,
-                    search=search,
+                    search=self._search_view(candidates, chosen=asset),
                     asset=asset,
-                    job_id=None,
-                    remix_job_id=None,
+                    reply=decision.reply,
                     reasons=decision.reasons or ["Hermes 选择了已有音频资产"],
-                    planner_meta=PlannerMeta(
-                        planner_source="hermes",
-                        planner_confidence=decision.confidence,
-                        planner_latency_ms=hermes_latency_ms,
-                    ),
+                    planner_meta=planner_meta,
                     selected_skill=selected_skill,
                     tool_calls=[
                         hermes_call,
                         AgentToolCall(name="play_asset", status="succeeded", input={"asset_id": asset.id}, output={"asset_id": asset.id}),
                     ],
                 )
+            # Hermes referenced an asset that is not in the catalog: never play
+            # something the user didn't ask for — regenerate or admit no match.
+            extra_reasons.append(f"Hermes 返回的 asset_id 无效（{decision.asset_id!r}），已降级")
+            hermes_call.reason = "invalid asset_id from Hermes — downgraded"
             action = "generate_job" if request.generation_allowed else "no_match"
 
         if action == "remix_current":
@@ -251,16 +405,12 @@ class HermesAgentRuntime:
                     action="remix_current",
                     normalized_request=normalized,
                     profile_context=profile_context,
-                    search=search,
+                    search=self._search_view(candidates),
                     asset=asset,
-                    job_id=None,
                     remix_job_id=job_id,
+                    reply=decision.reply,
                     reasons=decision.reasons or [f"Hermes 选择为当前音频添加{sound_type}背景"],
-                    planner_meta=PlannerMeta(
-                        planner_source="hermes",
-                        planner_confidence=decision.confidence,
-                        planner_latency_ms=hermes_latency_ms,
-                    ),
+                    planner_meta=planner_meta,
                     selected_skill=selected_skill,
                     tool_calls=[
                         hermes_call,
@@ -273,6 +423,7 @@ class HermesAgentRuntime:
                         ),
                     ],
                 )
+            extra_reasons.append("remix 需要 current_asset_id，已降级")
             action = "generate_job" if request.generation_allowed else "no_match"
 
         if action == "no_match" or not request.generation_allowed:
@@ -280,87 +431,62 @@ class HermesAgentRuntime:
                 action="no_match",
                 normalized_request=normalized,
                 profile_context=profile_context,
-                search=search,
+                search=self._search_view(candidates),
                 asset=None,
-                job_id=None,
-                remix_job_id=None,
-                reasons=decision.reasons or ["Hermes 未选择生成，且当前没有可播放资产"],
-                planner_meta=PlannerMeta(
-                    planner_source="hermes",
-                    planner_confidence=decision.confidence,
-                    planner_latency_ms=hermes_latency_ms,
-                ),
+                reply=decision.reply,
+                reasons=(decision.reasons or ["Hermes 未选择生成，且当前没有可播放资产"]) + extra_reasons,
+                planner_meta=planner_meta,
                 selected_skill="no_match",
                 tool_calls=[hermes_call],
             )
 
         self._gen.check_generation_budget(request.user_id)
+        directive = decision.directive
+        if directive is None and self._directive_planner is not None:
+            try:
+                directive = self._directive_planner.plan(request.request_text, profile_context)
+            except Exception:  # noqa: BLE001 — directive is best-effort
+                directive = None
         generate_started = time.perf_counter()
         generation_request = GenerationRequest(
             request_text=request.request_text,
             force_generate=True,
-            directive=decision.directive,
+            directive=directive,
         )
         response = self._gen.enqueue_or_match(request.user_id, generation_request)
         return AgentDecideResponse(
             action="generate_job",
             normalized_request=response.normalized_request,
             profile_context=profile_context,
-            search=search,
+            search=self._search_view(candidates),
             asset=None,
             job_id=response.job_id,
-            remix_job_id=None,
-            reasons=decision.reasons or ["Hermes 选择生成新的助眠音频"],
-            planner_meta=PlannerMeta(
-                planner_source="hermes",
-                planner_confidence=decision.confidence,
-                planner_latency_ms=hermes_latency_ms,
-            ),
+            reply=decision.reply,
+            reasons=(decision.reasons or ["Hermes 选择生成新的助眠音频"]) + extra_reasons,
+            planner_meta=planner_meta,
             selected_skill="generate_sleep_audio",
             tool_calls=[
                 hermes_call,
                 AgentToolCall(
                     name="generate_sleep_audio",
                     status=response.status,
-                    input={"request_text": request.request_text, "has_directive": decision.directive is not None},
+                    input={"request_text": request.request_text, "has_directive": directive is not None},
                     output={"job_id": response.job_id, "match_type": response.match_type},
                     latency_ms=int((time.perf_counter() - generate_started) * 1000),
                 ),
             ],
         )
 
-    def _fallback(self, request: AgentDecideRequest, exc: Exception, latency_ms: int) -> AgentDecideResponse:
-        response = self._local_agent.run(request)
-        meta = response.planner_meta or PlannerMeta()
-        return response.model_copy(
-            update={
-                "planner_meta": PlannerMeta(
-                    planner_source=meta.planner_source,
-                    planner_confidence=meta.planner_confidence,
-                    planner_latency_ms=meta.planner_latency_ms,
-                    fallback_reason=f"hermes_unavailable:{type(exc).__name__}",
-                ),
-                "tool_calls": [
-                    AgentToolCall(
-                        name="hermes_agent",
-                        status="failed",
-                        input={"user_id": request.user_id, "request_text": request.request_text},
-                        output={"error": str(exc)[:240]},
-                        latency_ms=latency_ms,
-                    ),
-                    *response.tool_calls,
-                ],
-            }
-        )
 
-
-def _select_asset(search: AssetSearchResponse, asset_id: str | None) -> AudioAsset | None:
-    if asset_id:
-        for result in search.results:
-            if result.asset.id == asset_id:
-                return result.asset
-    if search.results:
-        return search.results[0].asset
+def _select_asset(candidates: list[AudioAsset], asset_id: str | None) -> AudioAsset | None:
+    """Strict lookup: the agent's asset_id must reference a real catalog asset.
+    No silent fallback to the first candidate — a wrong asset played to a user
+    trying to sleep is worse than regenerating."""
+    if not asset_id:
+        return None
+    for asset in candidates:
+        if asset.id == asset_id:
+            return asset
     return None
 
 
@@ -414,42 +540,47 @@ def _extract_json_object(text: str) -> dict[str, Any]:
 def _build_decision_prompt(
     request: AgentDecideRequest,
     profile_context: ProfileContext,
-    search: AssetSearchResponse,
+    candidates: list[AudioAsset],
 ) -> str:
-    candidates = [
+    catalog = [
         {
-            "asset_id": item.asset.id,
-            "title": item.asset.title,
-            "type": item.asset.type.value,
-            "duration_sec": item.asset.duration_sec,
-            "tags": item.asset.tags,
-            "score": item.score,
-            "match_type": item.match_type,
-            "reasons": item.reasons,
+            "asset_id": asset.id,
+            "title": asset.title,
+            "type": asset.type.value,
+            "duration_sec": asset.duration_sec,
+            "tags": asset.tags,
+            "mood_tags": asset.mood_tags,
         }
-        for item in search.results
+        for asset in candidates
     ]
     context = {
         "user_request": request.model_dump(mode="json"),
         "profile": profile_context.model_dump(mode="json"),
-        "asset_search": {
-            "hit": search.hit,
-            "best_score": search.best_score,
-            "threshold": search.threshold,
-            "candidates": candidates,
-        },
+        "catalog": catalog,
     }
     return json.dumps(context, ensure_ascii=False)
 
 
 _HERMES_DECISION_INSTRUCTIONS = """
-你是 Floppy 的智能体决策层。你只负责选择下一步 workflow skill；不要生成给用户看的自然语言。
+你是 Floppy——一个温柔的睡前陪伴智能体。用户在睡前跟你聊天、倾诉，或想听点助眠的声音。你同时是资源匹配的唯一裁决者：catalog 是当前全部可播放的音频目录（未经算法过滤）。
 
-可选 action 只能是：
-- play_asset：候选资产已经足够匹配，直接播放。必须填写 asset_id，且只能来自 candidates。
-- generate_job：需要生成新的助眠音频。generation_allowed=false 时禁止选择。
-- remix_current：用户想给 current_asset_id 对应的当前音频加背景、换背景或调整背景。必须存在 current_asset_id。
-- no_match：没有可播放资产，且不能或不应该生成。
+每一轮你做两件事：
+1) 选择本轮 action；
+2) 写 reply——给用户看的一句话回复。温柔、口语化、简短（不超过 40 字），像深夜里坐在旁边的朋友，不要客服腔。每个 action 都必须写 reply。
+
+可选 action：
+- chat：用户在闲聊、倾诉、提问，没有想听内容的意图。reply 就是你的聊天回复：先共情、接住情绪，可以自然聊下去；只有当用户表露睡不着/焦虑时才顺势轻轻提一句"要不要听点什么"，不要每轮都推销。
+- play_asset：用户想听内容（点名要，或对话里明确表达想要声音陪伴），且 catalog 里有真正合适的资产。必须填写 asset_id，且严格来自 catalog；宁可 generate_job 也不要拿勉强沾边的凑数。reply 例："给你放一段《夜雨轻敲》，闭上眼睛听听看。"
+- generate_job：想听的内容 catalog 里没有，需要现场生成（generation_allowed=false 时禁止）。reply 要告知正在专门为 TA 制作，需要等一小会儿。
+- remix_current：用户想给 current_asset_id 对应的当前音频加/换/调背景音。必须存在 current_asset_id。
+- no_match：想听但既无合适资产也不能生成。reply 温柔致歉并给个替代建议。
+
+判断"想听"的信号：出现"听/放/来一段/讲个/生成/换一个"等词，或用户说睡不着、想要人陪着说话入睡。仅仅是倾诉情绪、问问题、打招呼时选 chat。
+
+匹配判断要点：
+- 以用户这句话的真实意图为准（内容类型、意象、时长、声音风格），profile 只是辅助偏好；结合对话上下文（比如上一轮你刚推荐过什么）。
+- 用户点名的意象（如"海边""篝火"）catalog 里没有就 generate_job，不要用无关资产凑数。
+- duration_sec 与用户要求相差过大视为不匹配。
 
 如果选择 generate_job，尽量填写 directive：
 - intent: white_noise | music | asmr | story | meditation | podcast_digest
@@ -464,11 +595,12 @@ _HERMES_DECISION_INSTRUCTIONS = """
 
 只输出一个 JSON 对象，不要 Markdown，不要解释。格式：
 {
-  "action": "play_asset|generate_job|remix_current|no_match",
-  "selected_skill": "play_asset|generate_sleep_audio|remix_current|no_match",
+  "action": "chat|play_asset|generate_job|remix_current|no_match",
+  "selected_skill": "chat|play_asset|generate_sleep_audio|remix_current|no_match",
   "asset_id": null,
   "remix_sound_type": null,
   "directive": null,
+  "reply": "给用户看的一句话",
   "reasons": ["简短中文原因"],
   "confidence": 0.0
 }

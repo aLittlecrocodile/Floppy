@@ -12,3 +12,6 @@ storage/
 .ccb-ducc-ccb
 .comate/
 .DS_Store
+
+# Frontend colleague's repo (zxy20030810/Floppy) — lives in its own git history
+front/

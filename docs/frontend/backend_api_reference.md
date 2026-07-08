@@ -1,8 +1,9 @@
 # Floppy 后端接口文档（前端对接版）
 
-> 版本：基于当前 `floppy_backend/main.py` 实现整理  
-> Base URL（本地）：`http://127.0.0.1:8000`（如用 8010 端口启动则替换为对应端口）  
-> 编码：请求与响应均为 `application/json; charset=utf-8`  
+> 版本：基于当前 `floppy_backend/main.py` 实现整理（2026-06 更新：智能体指挥生成 + 真人声缓存 + 关额度）
+> Base URL（本地）：`http://127.0.0.1:8000`（如用其它端口启动则替换；上云后替换为公网地址）
+> 实时语音对话另见 WebSocket 文档：`docs/contracts/voice_dialog_ws.md`
+> 编码：请求与响应均为 `application/json; charset=utf-8`
 > 鉴权：当前 MVP 无鉴权，`user_id` 由前端在路径中传入
 
 ---
@@ -11,7 +12,15 @@
 
 - 最简单的演示链路只需一个接口：`POST /demo/chat`，输入一句话，返回可播放的 `audio_url`，后端同步完成检索/生成，前端无需轮询。
 - 生产链路（可控、异步）建议用：`PUT /users/{user_id}/profile` → `POST /agent/decide` →（命中直接播放 / 未命中拿 `job_id` 轮询 `GET /generation-jobs/{job_id}`）→ 上报 `POST /users/{user_id}/events`。
+- 实时语音对话（ASR→对话→TTS，含听音频意图）：WebSocket `/voice/ws`，浏览器 Demo 页 `GET /voice`，协议见 `docs/contracts/voice_dialog_ws.md`。
 - 音频播放：所有返回的 `playback_url` / `audio_url` 都可直接作为 `<audio src>` 使用。
+
+### 生成与缓存（重要变更）
+
+- 未命中资产时，智能体**先把用户需求+画像提炼成内容指令（GenerationDirective，含分段要点）**，再由 workflow 用真人声（MiniMax TTS）写出贴合用户的脚本——不再是套通用模板。
+- 生成产物按 `prompt_hash` 入库缓存。**同一需求第二次请求会精确命中缓存（`action=play_asset`，不再生成）**；换了内容（不同意象/时长/类型）才重新生成。
+- 缓存音频存于服务器 `storage/audio/ondemand/{user_id}/`，前端只认返回的 `playback_url`，无需关心路径。
+- meditation/story/podcast 已**预热**了一批真人声缓存；white_noise/music 是真实素材，直接命中。
 
 通用错误响应（FastAPI 标准）：
 
@@ -28,7 +37,7 @@
 | 202 | 已受理，异步处理中（生成任务 / remix） |
 | 400 | 参数错误 |
 | 404 | 资源不存在（profile / asset / job 未找到） |
-| 429 | 超出每日生成额度 / remix 频率限制 |
+| 429 | remix 频率限制（生成额度默认**已关闭**，见第 9 节） |
 
 ---
 
@@ -81,21 +90,21 @@
 ```json
 {
   "action": "play_asset",
-  "audio_url": "http://127.0.0.1:8000/audio/pregen/meditation/xxx.wav",
+  "audio_url": "http://127.0.0.1:8000/audio/ondemand/demo_user/3f2a1c9e8b7d6543.mp3",
   "asset": {
     "id": "aud_xxx",
     "type": "meditation",
     "title": "呼吸觉察·雨夜版",
     "duration_sec": 600,
-    "playback_url": "http://127.0.0.1:8000/audio/pregen/meditation/xxx.wav"
+    "playback_url": "http://127.0.0.1:8000/audio/ondemand/demo_user/3f2a1c9e8b7d6543.mp3"
   },
   "is_placeholder": false,
   "job_id": null,
   "job_status": null,
-  "best_score": 0.63,
+  "best_score": 1.0,
   "hit": true,
   "threshold": 0.58,
-  "reasons": ["标签命中: breathing, rain", "质量评分高"],
+  "reasons": ["精确缓存命中"],
   "planner_meta": {
     "planner_source": "ai",
     "planner_confidence": 0.9,
@@ -406,6 +415,8 @@
 
 `action`：`play_asset` | `generate_job` | `remix_current` | `no_match`。
 
+> 2026-07 起决策层全量迁移至 Hermes 智能体：资源匹配由智能体在资产目录中自主裁决，不再有相似度打分/阈值门槛。`planner_meta.planner_source` 为 `hermes`（或 `exact_cache` 精确缓存短路）；此接口返回的 `search.threshold` 恒为 0，`search.results` 仅作展示/兜底推荐用。Hermes 不可用时返回 `no_match`，`fallback_reason` 以 `hermes_unavailable:` 开头。
+
 前端处理建议：
 - `play_asset` → 直接播 `asset.playback_url`
 - `generate_job` → 用 `job_id` 轮询 `GET /generation-jobs/{job_id}`
@@ -541,17 +552,16 @@
 音频类型 `AudioType`：`white_noise` `music` `asmr` `story` `meditation` `podcast_digest`
 
 资产来源 `created_by`：
-- `seed_placeholder` 种子占位
-- `pregen_local` 本地预生成占位
-- `pregen_minimax` 真实 TTS 预生成
-- `ondemand` 实时生成
+- `real_asset` 真实素材音频（white_noise/music，公版录音/演奏）
+- `ondemand` 智能体按需生成的真人声（含预热缓存）
 - `remix` 混音输出
+- `seed_placeholder` / `pregen_local` 旧版占位（已弃用，不再 seed）
 
 其他：
-- `is_placeholder`（仅 `/demo/chat`）：`created_by` 为 seed/pregen_local 时为 true
+- `is_placeholder`（仅 `/demo/chat`）：占位音频时为 true（现网已无占位资产）
 - remix 输出资产带 `remix` 标签，可参与推荐
 - 默认命中阈值 `threshold = 0.58`
-- 默认每日额度：字符 200000、生成次数 10（超出返回 429）
+- **生成额度默认已关闭**（`FLOPPY_ENFORCE_GENERATION_BUDGET=false`），不再因每日次数/字数返回 429；如需开启，置为 `true`，默认上限字符 200000、生成次数 10。
 
 ---
 
@@ -560,8 +570,8 @@
 ```text
 1. PUT  /users/{user_id}/profile           # 首次/更新画像
 2. POST /agent/decide                       # 输入一句话拿决策
-   ├─ action=play_asset   → 播 asset.playback_url
-   ├─ action=generate_job → 轮询 GET /generation-jobs/{job_id} 到 succeeded
+   ├─ action=play_asset   → 播 asset.playback_url（命中缓存/已有资产，含已生成过的真人声）
+   ├─ action=generate_job → 智能体已组装内容指令并入队，轮询 GET /generation-jobs/{job_id} 到 succeeded（首次生成真人声，约 10-25s；之后同需求会走 play_asset）
    ├─ action=remix_current→ 轮询 GET /remix-jobs/{remix_job_id} 到 succeeded
    └─ action=no_match     → 提示无结果 + search.results 兜底
 3. POST /users/{user_id}/playback           # 开始播放
@@ -570,3 +580,5 @@
 ```
 
 > Demo 阶段可直接只用 `POST /demo/chat`，无需上面这套流程。
+> 实时语音对话用 WebSocket `/voice/ws`，协议另见 `docs/contracts/voice_dialog_ws.md`。
+> 后端启动/部署/环境变量见 `docs/STARTUP.md`。

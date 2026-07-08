@@ -15,25 +15,23 @@ App / Voice WS / Demo
 
 This avoids binding product workflow state to Hermes internals while replacing the hand-written agent planner with a real agent runtime.
 
-## Runtime Switch
+## Runtime (Hermes-only)
 
-Default local runtime:
+Hermes is the sole decision layer — the LangGraph/scoring-based local runtime has been removed. Matching is agent-driven: Hermes receives the (capped, newest-first) asset catalog and autonomously picks `play_asset` / `generate_job` / `remix_current` / `no_match`. There is no similarity score or hit threshold gating its choice.
+
+Two deterministic guards remain outside Hermes:
+
+- **Exact cache short-circuit**: an exact `prompt_hash` hit plays the cached asset without consulting Hermes (same request never regenerates paid TTS).
+- **Strict asset_id validation**: a `play_asset` decision must reference a real catalog asset_id, otherwise it is downgraded to `generate_job` / `no_match` (never silently plays a different asset).
 
 ```bash
-FLOPPY_AGENT_RUNTIME=local
-```
-
-Hermes runtime:
-
-```bash
-FLOPPY_AGENT_RUNTIME=hermes
 FLOPPY_HERMES_BASE_URL=http://127.0.0.1:8642
 FLOPPY_HERMES_API_KEY=change-me-local-dev
 FLOPPY_HERMES_MODEL=hermes-agent
-FLOPPY_HERMES_FALLBACK_TO_LOCAL=true
+FLOPPY_HERMES_CATALOG_LIMIT=60   # max assets shown to Hermes per decision
 ```
 
-When `FLOPPY_HERMES_FALLBACK_TO_LOCAL=true`, Hermes errors are converted into a local LangGraph decision. The response `planner_meta.fallback_reason` starts with `hermes_unavailable:`.
+When Hermes is unreachable, the runtime degrades to `no_match` (plus catalog suggestions in `search.results`) and `planner_meta.fallback_reason` starts with `hermes_unavailable:`. `planner_meta.planner_source` is `hermes`, or `exact_cache` when the short-circuit fired.
 
 ## Hermes Setup
 
