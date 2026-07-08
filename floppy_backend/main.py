@@ -761,12 +761,19 @@ def voice_intent(payload: VoiceIntentIn):
     }
     text = payload.text.strip()
     if len(text) < 2:
-        return {"action": "no_match", "reply": "我没听清楚，能再说一遍吗?", "audio": None, **echo}
+        reply = "我没听清楚，能再说一遍吗?"
+        return {"action": "no_match", "reply": reply, "replyAudioUrl": _reply_audio_url(reply), "audio": None, **echo}
 
     _ensure_demo_profile(payload.user_id)
     response = state.agent_runtime.run(
         AgentDecideRequest(user_id=payload.user_id, request_text=text, generation_allowed=True)
     )
+
+    # Pure conversation turn — the agent chatted, nothing to play.
+    if response.action == "chat":
+        reply = response.reply or "我在呢，想聊什么都可以。"
+        return {"action": "chat", "reply": reply, "replyAudioUrl": _reply_audio_url(reply), "audio": None, **echo}
+
     asset = response.asset
     generated_now = False
     if response.action == "generate_job" and response.job_id:
@@ -781,16 +788,16 @@ def voice_intent(payload: VoiceIntentIn):
 
     if asset is not None:
         if generated_now:
-            reply = f"我为你专门生成了一段新的音频：《{asset.title}》，希望你喜欢。"
-        elif response.action == "remix_current":
-            reply = f"已经给当前音频换上了新的背景音效：《{asset.title}》。"
+            reply = f"我为你专门做了一段新的音频：《{asset.title}》，希望你喜欢。"
         else:
-            reply = f"我给你找了一段适合现在听的音频：《{asset.title}》。"
-        return {"action": "play_asset", "reply": reply, "audio": _audio_item(asset), **echo}
+            reply = response.reply or f"我给你找了一段适合现在听的音频：《{asset.title}》。"
+        return {"action": "play_asset", "reply": reply, "replyAudioUrl": _reply_audio_url(reply), "audio": _audio_item(asset), **echo}
 
+    no_match_reply = response.reply or "暂时没有找到合适的内容，换个说法再试试？"
     return {
         "action": "no_match",
-        "reply": "暂时没有找到合适的内容，换个说法再试试？",
+        "reply": no_match_reply,
+        "replyAudioUrl": _reply_audio_url(no_match_reply),
         "audio": None,
         **echo,
     }
@@ -1155,3 +1162,141 @@ def mobile_upload_noop(user_id: str, upload_id: str):
     if asset is None:
         raise HTTPException(status_code=404, detail="upload not found")
     return _upload_item(asset)
+
+
+def _reply_audio_url(reply: str) -> str | None:
+    """Synthesize the agent's spoken reply (MiniMax TTS), cached by reply text.
+
+    Best-effort: any failure falls back to text-only. Short replies (≤40 chars)
+    cost ~$0.002 and ~1-2s; repeated phrasings hit the file cache."""
+    text = (reply or "").strip()
+    if not text:
+        return None
+    provider = state.generation_service.provider
+    if not hasattr(provider, "generate_text_to_file"):
+        return None  # local tone provider — no real voice
+    import hashlib
+    digest = hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
+    object_key = f"replies/{digest}.mp3"
+    try:
+        path = state.storage.path_for(object_key)
+        if not path.exists():
+            provider.generate_text_to_file(text, path, object_key, voice_style="warm_female", title="floppy_reply")
+        return state.storage.public_url(object_key)
+    except Exception:  # noqa: BLE001 — voice reply is an enhancement, never a blocker
+        return None
+
+
+@app.websocket("/voice/realtime")
+async def voice_realtime_ws(websocket: WebSocket):
+    """「和 Floppy 打电话」— 豆包端到端实时语音的代理通道（纯陪聊模式）。
+
+    App 侧协议（简单）：
+      上行：binary = PCM 16k/mono/s16le 麦克风流；{"type":"stop"} 结束
+      下行：binary = PCM 24k/mono/s16le 回复音频（AudioTrack 直接播）
+            JSON  = {"type":"ready"|"asr"|"asr_info"|"chat"|"tts_end"|"error", ...}
+    上游豆包二进制协议、人设注入全部由本端点处理（providers/volc_realtime.py）。
+    """
+    import websockets as ws_client
+    from floppy_backend.providers import volc_realtime as vr
+
+    await websocket.accept()
+    settings = get_settings()
+    user_id = websocket.query_params.get("user_id") or "realtime_user"
+    session_id = str(__import__("uuid").uuid4())
+
+    try:
+        headers = vr.upstream_headers(settings)
+    except RuntimeError as exc:
+        await websocket.send_text(json.dumps({"type": "error", "message": str(exc)}, ensure_ascii=False))
+        await websocket.close(code=1011)
+        return
+
+    try:
+        upstream = await ws_client.connect(vr.REALTIME_URL, additional_headers=headers, open_timeout=10, max_size=10 * 1024 * 1024)
+    except Exception as exc:  # noqa: BLE001
+        await websocket.send_text(json.dumps({"type": "error", "message": f"豆包连接失败: {exc}"}, ensure_ascii=False))
+        await websocket.close(code=1011)
+        return
+
+    async def _emit(obj: dict) -> None:
+        await websocket.send_text(json.dumps(obj, ensure_ascii=False))
+
+    try:
+        # 握手序列: StartConnection → ConnectionStarted → StartSession → SessionStarted
+        await upstream.send(vr.start_connection_frame())
+        evt = vr.parse_server_frame(await upstream.recv())
+        if evt.event != vr.EV_CONNECTION_STARTED:
+            raise RuntimeError(f"unexpected connect event {evt.event}: {evt.json()}")
+        await upstream.send(vr.start_session_frame(session_id, vr.session_config(settings)))
+        evt = vr.parse_server_frame(await upstream.recv())
+        if evt.event != vr.EV_SESSION_STARTED:
+            raise RuntimeError(f"session start failed {evt.event}: {evt.json()}")
+        await _emit({"type": "ready", "dialogId": evt.json().get("dialog_id", "")})
+    except Exception as exc:  # noqa: BLE001
+        await _emit({"type": "error", "message": f"会话建立失败: {exc}"})
+        await upstream.close()
+        await websocket.close(code=1011)
+        return
+
+    async def _pump_upstream() -> None:
+        """豆包事件 → App 简单协议"""
+        try:
+            async for raw in upstream:
+                evt = vr.parse_server_frame(raw)
+                if evt.event == vr.EV_TTS_RESPONSE:
+                    await websocket.send_bytes(evt.payload)
+                elif evt.event == vr.EV_ASR_INFO:
+                    await _emit({"type": "asr_info"})  # 用户开口 → 客户端立刻停播（打断）
+                elif evt.event == vr.EV_ASR_RESPONSE:
+                    results = evt.json().get("results") or []
+                    if results:
+                        await _emit({"type": "asr", "text": results[0].get("text", ""), "interim": bool(results[0].get("is_interim"))})
+                elif evt.event == vr.EV_CHAT_RESPONSE:
+                    await _emit({"type": "chat", "text": evt.json().get("content", "")})
+                elif evt.event == vr.EV_TTS_ENDED:
+                    await _emit({"type": "tts_end"})
+                elif evt.event in (vr.EV_SESSION_FINISHED,):
+                    break
+                elif evt.event in (vr.EV_SESSION_FAILED, vr.EV_DIALOG_ERROR, vr.EV_CONNECTION_FAILED):
+                    await _emit({"type": "error", "message": str(evt.json())})
+                    break
+        except Exception:  # noqa: BLE001 — upstream closed
+            pass
+        try:
+            await websocket.close()
+        except Exception:  # noqa: BLE001
+            pass
+
+    pump_task = asyncio.create_task(_pump_upstream())
+    try:
+        while True:
+            message = await websocket.receive()
+            if message.get("type") == "websocket.disconnect":
+                break
+            if (data := message.get("bytes")) is not None:
+                await upstream.send(vr.audio_frame(session_id, data))
+            elif (text := message.get("text")) is not None:
+                try:
+                    ctrl = json.loads(text)
+                except json.JSONDecodeError:
+                    continue
+                if ctrl.get("type") == "stop":
+                    break
+                if ctrl.get("type") == "text_query" and ctrl.get("text"):
+                    # 文本旁路（调试/无麦克风环境用）
+                    await upstream.send(vr.chat_text_query_frame(session_id, str(ctrl["text"])))
+    except WebSocketDisconnect:
+        pass
+    finally:
+        try:
+            await upstream.send(vr.finish_session_frame(session_id))
+            await upstream.send(vr.finish_connection_frame())
+        except Exception:  # noqa: BLE001
+            pass
+        await upstream.close()
+        pump_task.cancel()
+        try:
+            await websocket.close()
+        except Exception:  # noqa: BLE001
+            pass

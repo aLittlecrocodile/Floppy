@@ -32,12 +32,14 @@ from floppy_backend.services.remix import RemixService
 from floppy_backend.storage import LocalFileStorage
 
 
-_ACTIONS = {"play_asset", "generate_job", "remix_current", "no_match"}
+_ACTIONS = {"chat", "play_asset", "generate_job", "remix_current", "no_match"}
 _ACTION_ALIASES = {
     "generate_sleep_audio": "generate_job",
     "play_audio_asset": "play_asset",
     "search_audio_asset": "play_asset",
     "remix_audio": "remix_current",
+    "reply": "chat",
+    "talk": "chat",
 }
 
 
@@ -47,6 +49,7 @@ class HermesDecision(BaseModel):
     asset_id: str | None = None
     remix_sound_type: str | None = None
     directive: GenerationDirective | None = None
+    reply: str | None = None  # user-facing sentence, present on every action
     reasons: list[str] = Field(default_factory=list)
     confidence: float = Field(default=0.7, ge=0.0, le=1.0)
 
@@ -60,6 +63,7 @@ class HermesDecision(BaseModel):
         if self.selected_skill:
             return self.selected_skill
         return {
+            "chat": "chat",
             "play_asset": "play_asset",
             "generate_job": "generate_sleep_audio",
             "remix_current": "remix_current",
@@ -158,7 +162,7 @@ class HermesAgentRuntime:
         normalized = self._normalizer.normalize(
             GenerationRequest(request_text=request.request_text), profile_context
         )
-        cache_key = self._gen.cache_key_for(normalized)
+        cache_key = self._gen.cache_key_for(normalized, request_text=request.request_text)
 
         # Short-circuit ONLY on a verbatim repeat of a request that already
         # generated this asset. The cache key comes from lossy normalization —
@@ -170,11 +174,17 @@ class HermesAgentRuntime:
             return self._exact_cache_response(request, profile_context, normalized, exact)
 
         candidates = self._catalog_candidates()
-        try:
-            decision = self._client.decide(request=request, profile_context=profile_context, candidates=candidates)
-        except Exception as exc:  # noqa: BLE001 — network/parse/validation errors from Hermes
+        decision = None
+        last_exc: Exception | None = None
+        for _ in range(2):  # one retry — Hermes/LLM cold-start hiccups are transient
+            try:
+                decision = self._client.decide(request=request, profile_context=profile_context, candidates=candidates)
+                break
+            except Exception as exc:  # noqa: BLE001 — network/parse/validation errors from Hermes
+                last_exc = exc
+        if decision is None:
             return self._degraded_response(
-                request, profile_context, normalized, candidates, exc,
+                request, profile_context, normalized, candidates, last_exc,
                 int((time.perf_counter() - started) * 1000),
             )
         hermes_latency_ms = int((time.perf_counter() - started) * 1000)
@@ -253,6 +263,7 @@ class HermesAgentRuntime:
             profile_context=profile_context,
             search=self._search_view([], chosen=asset, chosen_match_type="exact"),
             asset=asset,
+            reply=f"这就给你放《{asset.title}》，晚安。",
             reasons=["精确缓存命中，同一需求直接复用已生成音频"],
             planner_meta=PlannerMeta(planner_source="exact_cache", planner_confidence=1.0, planner_latency_ms=0),
             selected_skill="play_asset",
@@ -330,6 +341,20 @@ class HermesAgentRuntime:
             planner_latency_ms=hermes_latency_ms,
         )
 
+        if action == "chat":
+            return AgentDecideResponse(
+                action="chat",
+                normalized_request=normalized,
+                profile_context=profile_context,
+                search=self._search_view(candidates),
+                asset=None,
+                reply=decision.reply or "我在呢，想聊什么都可以。",
+                reasons=decision.reasons or ["Hermes 判断本轮为对话，无播放意图"],
+                planner_meta=planner_meta,
+                selected_skill="chat",
+                tool_calls=[hermes_call],
+            )
+
         if action == "play_asset":
             asset = _select_asset(candidates, decision.asset_id)
             if asset is not None:
@@ -343,6 +368,7 @@ class HermesAgentRuntime:
                     profile_context=profile_context,
                     search=self._search_view(candidates, chosen=asset),
                     asset=asset,
+                    reply=decision.reply,
                     reasons=decision.reasons or ["Hermes 选择了已有音频资产"],
                     planner_meta=planner_meta,
                     selected_skill=selected_skill,
@@ -382,6 +408,7 @@ class HermesAgentRuntime:
                     search=self._search_view(candidates),
                     asset=asset,
                     remix_job_id=job_id,
+                    reply=decision.reply,
                     reasons=decision.reasons or [f"Hermes 选择为当前音频添加{sound_type}背景"],
                     planner_meta=planner_meta,
                     selected_skill=selected_skill,
@@ -406,6 +433,7 @@ class HermesAgentRuntime:
                 profile_context=profile_context,
                 search=self._search_view(candidates),
                 asset=None,
+                reply=decision.reply,
                 reasons=(decision.reasons or ["Hermes 未选择生成，且当前没有可播放资产"]) + extra_reasons,
                 planner_meta=planner_meta,
                 selected_skill="no_match",
@@ -433,6 +461,7 @@ class HermesAgentRuntime:
             search=self._search_view(candidates),
             asset=None,
             job_id=response.job_id,
+            reply=decision.reply,
             reasons=(decision.reasons or ["Hermes 选择生成新的助眠音频"]) + extra_reasons,
             planner_meta=planner_meta,
             selected_skill="generate_sleep_audio",
@@ -533,18 +562,25 @@ def _build_decision_prompt(
 
 
 _HERMES_DECISION_INSTRUCTIONS = """
-你是 Floppy 的智能体决策层，也是资源匹配的唯一裁决者。catalog 是当前全部可播放的音频资产目录（未经算法过滤），由你自主判断哪一个真正满足用户需求；不要生成给用户看的自然语言。
+你是 Floppy——一个温柔的睡前陪伴智能体。用户在睡前跟你聊天、倾诉，或想听点助眠的声音。你同时是资源匹配的唯一裁决者：catalog 是当前全部可播放的音频目录（未经算法过滤）。
 
-可选 action 只能是：
-- play_asset：catalog 里存在真正符合用户需求的资产。必须填写 asset_id，且必须严格来自 catalog；宁可选择 generate_job 也不要播放勉强沾边的资产。
-- generate_job：catalog 里没有合适的资产，需要生成新的助眠音频。generation_allowed=false 时禁止选择。
-- remix_current：用户想给 current_asset_id 对应的当前音频加背景、换背景或调整背景。必须存在 current_asset_id。
-- no_match：没有可播放资产，且不能或不应该生成。
+每一轮你做两件事：
+1) 选择本轮 action；
+2) 写 reply——给用户看的一句话回复。温柔、口语化、简短（不超过 40 字），像深夜里坐在旁边的朋友，不要客服腔。每个 action 都必须写 reply。
+
+可选 action：
+- chat：用户在闲聊、倾诉、提问，没有想听内容的意图。reply 就是你的聊天回复：先共情、接住情绪，可以自然聊下去；只有当用户表露睡不着/焦虑时才顺势轻轻提一句"要不要听点什么"，不要每轮都推销。
+- play_asset：用户想听内容（点名要，或对话里明确表达想要声音陪伴），且 catalog 里有真正合适的资产。必须填写 asset_id，且严格来自 catalog；宁可 generate_job 也不要拿勉强沾边的凑数。reply 例："给你放一段《夜雨轻敲》，闭上眼睛听听看。"
+- generate_job：想听的内容 catalog 里没有，需要现场生成（generation_allowed=false 时禁止）。reply 要告知正在专门为 TA 制作，需要等一小会儿。
+- remix_current：用户想给 current_asset_id 对应的当前音频加/换/调背景音。必须存在 current_asset_id。
+- no_match：想听但既无合适资产也不能生成。reply 温柔致歉并给个替代建议。
+
+判断"想听"的信号：出现"听/放/来一段/讲个/生成/换一个"等词，或用户说睡不着、想要人陪着说话入睡。仅仅是倾诉情绪、问问题、打招呼时选 chat。
 
 匹配判断要点：
-- 以用户这句话的真实意图为准（内容类型、意象、时长、声音风格），profile 只是辅助偏好。
-- 用户点名要的意象/元素（如"海边""篝火"）如果 catalog 里没有对应资产，选 generate_job，不要用无关资产凑数。
-- duration_sec 与用户要求相差过大（如要 10 分钟却只有 60 秒）视为不匹配。
+- 以用户这句话的真实意图为准（内容类型、意象、时长、声音风格），profile 只是辅助偏好；结合对话上下文（比如上一轮你刚推荐过什么）。
+- 用户点名的意象（如"海边""篝火"）catalog 里没有就 generate_job，不要用无关资产凑数。
+- duration_sec 与用户要求相差过大视为不匹配。
 
 如果选择 generate_job，尽量填写 directive：
 - intent: white_noise | music | asmr | story | meditation | podcast_digest
@@ -559,11 +595,12 @@ _HERMES_DECISION_INSTRUCTIONS = """
 
 只输出一个 JSON 对象，不要 Markdown，不要解释。格式：
 {
-  "action": "play_asset|generate_job|remix_current|no_match",
-  "selected_skill": "play_asset|generate_sleep_audio|remix_current|no_match",
+  "action": "chat|play_asset|generate_job|remix_current|no_match",
+  "selected_skill": "chat|play_asset|generate_sleep_audio|remix_current|no_match",
   "asset_id": null,
   "remix_sound_type": null,
   "directive": null,
+  "reply": "给用户看的一句话",
   "reasons": ["简短中文原因"],
   "confidence": 0.0
 }

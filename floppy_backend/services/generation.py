@@ -175,16 +175,17 @@ class GenerationService:
             return
         self._mark_succeeded(job_id, asset, latency_ms, prepared.script, generated)
 
-    def cache_key_for(self, normalized: NormalizedAudioRequest, directive=None) -> str:
+    def cache_key_for(self, normalized: NormalizedAudioRequest, directive=None, request_text: str | None = None) -> str:
         return build_sleep_audio_cache_key(
-            normalized, provider_name=self.provider.name, settings=self._settings, directive=directive
+            normalized, provider_name=self.provider.name, settings=self._settings, directive=directive,
+            request_text=request_text,
         )
 
     def prepare(self, user_id: str, request: GenerationRequest, allow_cache: bool = True) -> PreparedGeneration:
         profile = self.repository.get_profile(user_id)
         normalized = self.normalizer.normalize(request, profile)
         directive = request.directive
-        cache_key = self.cache_key_for(normalized, directive)
+        cache_key = self.cache_key_for(normalized, directive, request_text=request.request_text)
 
         if allow_cache and not request.force_generate:
             # Exact prompt_hash cache only — fuzzy "close enough" matching is

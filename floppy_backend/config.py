@@ -66,6 +66,10 @@ class Settings(BaseSettings):
     script_writer_timeout_sec: float = 20.0
     script_writer_max_tokens: int = 2000
 
+    # 豆包端到端实时语音（"和 Floppy 打电话"陪聊模式；复用 volc_asr_api_key 凭证）
+    volc_realtime_model: str = "1.2.1.1"  # O2.0 版本，支持 system_role/speaking_style 人设
+    volc_realtime_speaker: str = "zh_female_vv_jupiter_bigtts"
+
     # --- Realtime voice dialog ---
     # MiniMax streaming TTS (WebSocket)
     minimax_ws_url: str = "wss://api.minimaxi.com/ws/v1/t2a_v2"

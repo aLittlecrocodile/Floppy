@@ -282,13 +282,14 @@ class AgentToolCall(BaseModel):
 
 
 class AgentDecideResponse(BaseModel):
-    action: str  # play_asset | generate_job | remix_current | no_match
+    action: str  # chat | play_asset | generate_job | remix_current | no_match
     normalized_request: NormalizedAudioRequest
     profile_context: ProfileContext
     search: AssetSearchResponse
     asset: AudioAsset | None = None
     job_id: str | None = None
     remix_job_id: str | None = None
+    reply: str | None = None  # agent's user-facing sentence (Hermes-written)
     reasons: list[str]
     planner_meta: PlannerMeta | None = None
     selected_skill: str | None = None

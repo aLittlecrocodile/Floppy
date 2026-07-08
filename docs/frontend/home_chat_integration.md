@@ -54,8 +54,9 @@ Chat 发文字（`source="chat"`）和 Home 语音识别完成后（`source="voi
 
 | 字段 | 说明 |
 |---|---|
-| `action` | `play_asset`（audio 可直接播）/ `no_match`（只显示 reply 文案） |
-| `reply` | 给用户看的一句话回复，Chat 气泡直接用 |
+| `action` | `play_asset`（audio 可直接播）/ `chat`（纯聊天轮，只显示 reply）/ `no_match`（只显示 reply 文案） |
+| `reply` | 给用户看的一句话回复，Chat 气泡直接用。**智能体现在支持多轮闲聊**（倾诉/提问会得到共情回复而不是硬塞音频），聊天中表达想听时才触发播放——前端无需改动，continue 展示 reply、audio 非空才播即可 |
+| `replyAudioUrl` | **Floppy 语音回复**（MiniMax 温柔女声念出 reply），string \| null。建议前端：非空则先播这段（几秒），`audio` 非空再接主音频。不播也不影响任何功能 |
 | `audio.streamUrl` | 可直接作为播放器 source |
 | `audio.coverUrl` | 当前恒为 `null`，前端用本地占位图 |
 | `audio.category` | `White Noise` `Music` `ASMR` `Story` `Meditation` `Podcast` |
@@ -125,6 +126,17 @@ Chat 发文字（`source="chat"`）和 Home 语音识别完成后（`source="voi
 > history 需要前端在播放时上报：`POST /users/{userId}/playback`（开始）和 `POST /users/{userId}/playback/{recordId}/feedback`（进度/评分），见 [backend_api_reference.md](./backend_api_reference.md) 第 7 节。不上报则 history 为空。
 
 ---
+
+## 5. WebSocket `/voice/realtime` — 和 Floppy 打电话（豆包端到端实时语音）
+
+`ws://<BASE>/voice/realtime?user_id=xxx` — 纯陪聊语音通话（亚秒级响应、可打断），Android 端已实现（`RealtimeCallClient.kt` + 右下角 📞 悬浮按钮）。
+
+协议（后端已把豆包二进制协议全部封装掉）：
+- **上行**：binary = 麦克风 PCM 16k/mono/s16le（20ms/包）；`{"type":"stop"}` 挂断
+- **下行**：binary = Floppy 回复语音 PCM **24k**/mono/s16le（AudioTrack 直接播）
+  JSON：`{"type":"ready"}`（接通，开始推麦克风）/ `{"type":"asr","text","interim"}`（你的话）/ `{"type":"chat","text"}`（Floppy 字幕）/ `{"type":"asr_info"}`（**用户开口信号，客户端立刻停播实现打断**）/ `{"type":"tts_end"}` / `{"type":"error","message"}`
+
+注意：通话是独立于 Chat 意图链路的陪聊模式；通话中想播助眠音频仍走 `/voice/intent`。
 
 ## 推荐接入流程
 
