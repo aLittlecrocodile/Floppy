@@ -3,11 +3,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from floppy_backend.config import Settings
-from floppy_backend.models import AssetSearchRequest, AudioAsset, AudioScript, EventIn, GenerationJobCreateResponse, GenerationRequest, GenerationResponse, NormalizedAudioRequest
+from floppy_backend.models import AudioAsset, AudioScript, EventIn, GenerationJobCreateResponse, GenerationRequest, GenerationResponse, NormalizedAudioRequest
 from floppy_backend.providers.audio import AudioGenerationProvider, GeneratedAudio
 from floppy_backend.repositories import Repository
 from floppy_backend.services.normalizer import RequestNormalizer
-from floppy_backend.services.recommendation import RecommendationService
 from floppy_backend.services.script import SleepScriptService
 from floppy_backend.storage import LocalFileStorage
 from floppy_backend.workflows.cache import build_sleep_audio_cache_key
@@ -21,6 +20,7 @@ class PreparedGeneration:
     cached_asset: AudioAsset | None
     match_type: str
     script: AudioScript | None = None
+    directive: object | None = None  # GenerationDirective — carried to the workflow for title/tags
 
 
 class BudgetExceededError(RuntimeError):
@@ -34,7 +34,6 @@ class GenerationService:
         storage: LocalFileStorage,
         provider: AudioGenerationProvider,
         normalizer: RequestNormalizer,
-        recommendation_service: RecommendationService,
         script_service: SleepScriptService,
         settings: Settings | None = None,
     ):
@@ -42,7 +41,6 @@ class GenerationService:
         self.storage = storage
         self.provider = provider
         self.normalizer = normalizer
-        self.recommendation_service = recommendation_service
         self.script_service = script_service
         self._settings = settings
         self.workflow_service = SleepAudioWorkflowService(
@@ -189,32 +187,34 @@ class GenerationService:
         cache_key = self.cache_key_for(normalized, directive)
 
         if allow_cache and not request.force_generate:
-            search = self.recommendation_service.search(
-                AssetSearchRequest(
-                    user_id=user_id,
-                    query=request.request_text,
-                    cache_key=cache_key,
-                    limit=1,
-                )
-            )
-            if search.hit and search.results:
-                result = search.results[0]
-                asset = result.asset
+            # Exact prompt_hash cache only — fuzzy "close enough" matching is
+            # the agent's call (Hermes decision layer), never this service's.
+            asset = self.repository.get_asset_by_prompt_hash(cache_key)
+            if asset is not None:
                 asset.playback_url = self.storage.public_url(asset.object_key)
                 self.repository.record_event(
                     user_id,
                     EventIn(
                         event_type="recommendation_served",
                         asset_id=asset.id,
-                        payload={"match_type": result.match_type, "score": result.score, "reasons": result.reasons},
+                        payload={"match_type": "exact", "reasons": ["精确缓存命中"]},
                     ),
                 )
-                return PreparedGeneration(normalized=normalized, cache_key=cache_key, cached_asset=asset, match_type=result.match_type)
+                return PreparedGeneration(normalized=normalized, cache_key=cache_key, cached_asset=asset, match_type="exact")
+
+        # The agent's directive knows the real content intent better than the
+        # keyword normalizer (which mislabels, e.g. "温和幽默" → white_noise via
+        # profile fallback). Override AFTER cache_key computation — the cache
+        # key must stay stable or repeat requests regenerate paid TTS.
+        if directive is not None and directive.intent is not None:
+            normalized = normalized.model_copy(update={"intent": directive.intent})
 
         script = self.workflow_service.prepare_script(
             user_id=user_id, normalized=normalized, profile=profile, directive=directive
         )
-        return PreparedGeneration(normalized=normalized, cache_key=cache_key, cached_asset=None, match_type="generated", script=script)
+        return PreparedGeneration(
+            normalized=normalized, cache_key=cache_key, cached_asset=None, match_type="generated", script=script, directive=directive
+        )
 
     def execute_generation(self, user_id: str, prepared: PreparedGeneration) -> tuple[AudioAsset, int, GeneratedAudio]:
         profile = self.repository.get_profile(user_id)
@@ -224,6 +224,7 @@ class GenerationService:
             normalized=prepared.normalized,
             profile=profile,
             script=prepared.script,
+            directive=prepared.directive,
         )
         return result.asset, result.latency_ms, result.generated
 

@@ -139,8 +139,8 @@ class Repository:
                 INSERT INTO audio_assets (
                     id, type, title, object_key, duration_sec, language, voice_id, prompt_hash,
                     content_hash, mood_tags, tags, sleep_stage, user_segment_tags, safety_status,
-                    quality_score, embedding, created_by, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    quality_score, embedding, created_by, tier, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
                     type=excluded.type,
                     title=excluded.title,
@@ -157,7 +157,8 @@ class Repository:
                     safety_status=excluded.safety_status,
                     quality_score=excluded.quality_score,
                     embedding=excluded.embedding,
-                    created_by=excluded.created_by
+                    created_by=excluded.created_by,
+                    tier=excluded.tier
                 """,
                 (
                     asset_id,
@@ -177,6 +178,7 @@ class Repository:
                     asset.quality_score,
                     dumps(asset.embedding),
                     asset.created_by,
+                    asset.tier,
                     created_at.isoformat(),
                 ),
             )
@@ -248,22 +250,37 @@ class Repository:
             row = self.conn.execute("SELECT * FROM audio_scripts WHERE script_hash = ?", (script_hash,)).fetchone()
         return self._script_from_row(row) if row is not None else None
 
-    def list_assets(self, limit: int = 500) -> list[AudioAsset]:
+    def list_assets(self, limit: int = 500, tier: str | None = None) -> list[AudioAsset]:
+        query = "SELECT * FROM audio_assets WHERE safety_status = 'approved'"
+        params: list = []
+        if tier is not None:
+            query += " AND tier = ?"
+            params.append(tier)
+        query += " ORDER BY quality_score DESC LIMIT ?"
+        params.append(limit)
         with self._lock:
-            rows = self.conn.execute(
-                "SELECT * FROM audio_assets WHERE safety_status = 'approved' ORDER BY quality_score DESC LIMIT ?",
-                (limit,),
-            ).fetchall()
+            rows = self.conn.execute(query, params).fetchall()
         return [self._asset_from_row(row) for row in rows]
 
-    def list_available_tags(self) -> set[str]:
+    def has_generation_request(self, cache_key: str, request_text: str) -> bool:
+        """True when this exact wording already produced this cache key — the
+        only case where serving the cached asset without consulting the agent
+        is safe (the lossy normalizer collapses unrelated requests onto the
+        same key)."""
         with self._lock:
-            rows = self.conn.execute("SELECT tags FROM audio_assets WHERE safety_status = 'approved'").fetchall()
-        tags: set[str] = set()
-        for row in rows:
-            if row["tags"]:
-                tags.update(loads(row["tags"]))
-        return tags
+            row = self.conn.execute(
+                "SELECT 1 FROM generation_jobs WHERE cache_key = ? AND request_text = ? LIMIT 1",
+                (cache_key, request_text),
+            ).fetchone()
+        return row is not None
+
+    def last_event_asset_id(self, user_id: str, event_type: str) -> str | None:
+        with self._lock:
+            row = self.conn.execute(
+                "SELECT asset_id FROM events WHERE user_id = ? AND event_type = ? ORDER BY created_at DESC LIMIT 1",
+                (user_id, event_type),
+            ).fetchone()
+        return row["asset_id"] if row is not None else None
 
     def create_generation_job(
         self,
@@ -503,6 +520,7 @@ class Repository:
             quality_score=row["quality_score"],
             embedding=loads(row["embedding"]),
             created_by=row["created_by"],
+            tier=row["tier"] if "tier" in row.keys() else "community",
             created_at=_dt(row["created_at"]),
         )
 

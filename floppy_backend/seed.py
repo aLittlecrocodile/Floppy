@@ -23,7 +23,7 @@ def _embedding_for(item: dict, voice_style: str) -> list[float]:
     )
 
 
-def seed_assets(repository: Repository, storage: LocalFileStorage, *, max_duration_sec: int | None = None) -> int:
+def seed_assets(repository: Repository, storage: LocalFileStorage) -> int:
     normalizer = RequestNormalizer()
     created = 0
     for item in AUDIO_CATALOG:
@@ -69,9 +69,9 @@ def seed_assets(repository: Repository, storage: LocalFileStorage, *, max_durati
                 quality_score=item["quality_score"],
                 embedding=_embedding_for(item, voice_style),
                 created_by=created_by,
+                tier="curated",
             )
         )
         created += 1
-    return created
     return created
 

@@ -36,7 +36,6 @@ from floppy_backend.repositories import Repository  # noqa: E402
 from floppy_backend.services.directive_planner import DirectivePlanner  # noqa: E402
 from floppy_backend.services.generation import GenerationService  # noqa: E402
 from floppy_backend.services.normalizer import RequestNormalizer  # noqa: E402
-from floppy_backend.services.recommendation import RecommendationService  # noqa: E402
 from floppy_backend.services.profile import ProfileService  # noqa: E402
 from floppy_backend.services.script import SleepScriptService  # noqa: E402
 from floppy_backend.services.script_writer import LLMScriptWriter  # noqa: E402
@@ -56,7 +55,6 @@ def main() -> int:
     initialize(conn)
     repository = Repository(conn)
     storage = LocalFileStorage(settings.storage_dir, settings.public_base_url)
-    recommendation = RecommendationService(repository, settings=settings)
 
     llm_key = settings.query_planner_api_key or settings.dialog_llm_api_key
     if not llm_key:
@@ -73,7 +71,7 @@ def main() -> int:
                                confidence_threshold=settings.directive_planner_confidence_threshold)
     gen = GenerationService(
         repository=repository, storage=storage, provider=build_audio_provider(settings),
-        normalizer=RequestNormalizer(), recommendation_service=recommendation,
+        normalizer=RequestNormalizer(),
         script_service=SleepScriptService(script_writer=writer), settings=settings,
     )
 

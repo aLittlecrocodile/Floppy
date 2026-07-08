@@ -117,6 +117,7 @@ class AudioAssetIn(BaseModel):
     quality_score: float = Field(ge=0, le=1)
     embedding: list[float]
     created_by: str
+    tier: str = "community"  # "curated" (real/prewarm, Home-eligible) | "community"
 
 
 class AudioAsset(AudioAssetIn):

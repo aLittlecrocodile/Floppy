@@ -415,6 +415,8 @@
 
 `action`：`play_asset` | `generate_job` | `remix_current` | `no_match`。
 
+> 2026-07 起决策层全量迁移至 Hermes 智能体：资源匹配由智能体在资产目录中自主裁决，不再有相似度打分/阈值门槛。`planner_meta.planner_source` 为 `hermes`（或 `exact_cache` 精确缓存短路）；此接口返回的 `search.threshold` 恒为 0，`search.results` 仅作展示/兜底推荐用。Hermes 不可用时返回 `no_match`，`fallback_reason` 以 `hermes_unavailable:` 开头。
+
 前端处理建议：
 - `play_asset` → 直接播 `asset.playback_url`
 - `generate_job` → 用 `job_id` 轮询 `GET /generation-jobs/{job_id}`
