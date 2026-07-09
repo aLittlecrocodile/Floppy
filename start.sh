@@ -5,12 +5,18 @@ cd "$(dirname "$0")"
 export NO_PROXY="localhost,127.0.0.1,::1,.local,.baidu-int.com"
 export no_proxy="$NO_PROXY"
 
-# 自动探测本机局域网 IP，手机端拿到的音频 URL 才永远指向可达地址。
-# en0 → en1 → 保留 .env/环境里已有的值。
-LAN_IP="$(ipconfig getifaddr en0 2>/dev/null || ipconfig getifaddr en1 2>/dev/null || true)"
-if [ -n "$LAN_IP" ]; then
-  export FLOPPY_PUBLIC_BASE_URL="http://${LAN_IP}:8000"
-  echo "[start] FLOPPY_PUBLIC_BASE_URL=$FLOPPY_PUBLIC_BASE_URL (auto-detected)"
+# 公网/沙盒部署：环境里已显式设置 FLOPPY_PUBLIC_BASE_URL 时绝不覆盖
+# （例：export FLOPPY_PUBLIC_BASE_URL=https://8000-i7qtsep0.agent-sandbox.baidu-int.com）。
+# 本地开发：自动探测局域网 IP（ipconfig 仅 macOS；Linux 沙盒上探测自然失败，
+# 落回环境/.env 里的值），手机拿到的音频 URL 才永远指向可达地址。
+if [ -n "$FLOPPY_PUBLIC_BASE_URL" ]; then
+  echo "[start] FLOPPY_PUBLIC_BASE_URL=$FLOPPY_PUBLIC_BASE_URL (from environment, respected)"
+else
+  LAN_IP="$(ipconfig getifaddr en0 2>/dev/null || ipconfig getifaddr en1 2>/dev/null || true)"
+  if [ -n "$LAN_IP" ]; then
+    export FLOPPY_PUBLIC_BASE_URL="http://${LAN_IP}:8000"
+    echo "[start] FLOPPY_PUBLIC_BASE_URL=$FLOPPY_PUBLIC_BASE_URL (auto-detected)"
+  fi
 fi
 
 # Hermes gateway（决策层，8642）——未运行则拉起

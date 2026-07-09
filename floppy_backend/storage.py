@@ -15,6 +15,12 @@ def set_request_base_url(base_url: str | None) -> None:
     _request_base_url.set(base_url.rstrip("/") if base_url else None)
 
 
+def get_request_base_url() -> str | None:
+    """当前请求/连接的 base URL（无请求上下文时为 None）。
+    用于把 HTTP/WS 上下文里的 Host 带进后台线程（executor 回调不继承 ContextVar）。"""
+    return _request_base_url.get()
+
+
 class LocalFileStorage:
     def __init__(self, storage_dir: Path, public_base_url: str):
         self.storage_dir = storage_dir.resolve()

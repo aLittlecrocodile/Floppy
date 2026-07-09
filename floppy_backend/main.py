@@ -62,7 +62,7 @@ from floppy_backend.services.normalizer import RequestNormalizer
 from floppy_backend.services.profile import ProfileService
 from floppy_backend.services.remix import RemixService
 from floppy_backend.services.script import SleepScriptService
-from floppy_backend.storage import LocalFileStorage, set_request_base_url
+from floppy_backend.storage import LocalFileStorage, get_request_base_url, set_request_base_url
 from floppy_backend.logging_setup import AccessLogMiddleware, setup_logging
 
 # Configure console + rotating-file logging as early as possible so import-time
@@ -161,6 +161,10 @@ async def lifespan(app: FastAPI):
         seed_assets(repository, storage)
     except Exception:  # noqa: BLE001 — seeding is best-effort at startup
         pass
+    # 上次进程被杀留下的僵尸任务会永远吸走同类请求 —— 启动时统一判失败
+    stale = repository.fail_stale_generation_jobs()
+    if stale:
+        logger.warning("swept %d orphaned generation jobs from previous run", stale)
     # 预热兜底播报语音（固定文案），之后所有播报零延迟命中文件缓存
     _reply_tts_executor.submit(_notify_audio_url)
     yield
@@ -173,16 +177,23 @@ app = FastAPI(title="Floppy Backend MVP", version="0.1.0", lifespan=lifespan)
 class _RequestBaseURLMiddleware:
     """Pure-ASGI middleware: record the request's own base URL so playback
     URLs are minted on the host the client actually reached us at (a phone
-    that hit http://<lan-ip>:8000 gets stream URLs on that same IP)."""
+    that hit http://<lan-ip>:8000 gets stream URLs on that same IP).
+
+    覆盖 http 和 websocket 两种 scope；scheme 优先取 X-Forwarded-Proto ——
+    部署在 sandbox（https 终结在代理层）时本地 scope 是 http，不处理转发头
+    会拼出打不开的 http://xxx.baidu-int.com 地址。"""
 
     def __init__(self, app):  # noqa: ANN001 — ASGI app
         self.app = app
 
     async def __call__(self, scope, receive, send):  # noqa: ANN001 — ASGI signature
-        if scope["type"] == "http":
+        if scope["type"] in ("http", "websocket"):
             headers = {key: value for key, value in scope.get("headers") or []}
             host = headers.get(b"host", b"").decode("latin-1").strip()
-            scheme = scope.get("scheme") or "http"
+            forwarded_proto = headers.get(b"x-forwarded-proto", b"").decode("latin-1").split(",")[0].strip()
+            scheme = forwarded_proto or scope.get("scheme") or "http"
+            if scheme in ("ws", "wss"):  # websocket scope 的 scheme 转成可播放的 http(s)
+                scheme = "https" if scheme == "wss" else "http"
             set_request_base_url(f"{scheme}://{host}" if host else None)
         await self.app(scope, receive, send)
 
@@ -849,14 +860,28 @@ def _notify_audio_url() -> str | None:
 
 
 def _job_done_notifier(user_id: str, job_id: str):
-    """executor future 的 done-callback（跑在生成线程里）：任务成功时把
-    generation_done 推给该用户在线的「打电话」连接。没有连接就静默——
-    聊天端拿着 job_id 轮询 /v1/generation-tasks/{id} 兜底。"""
+    """executor future 的 done-callback（跑在生成线程里）：任务成功推
+    generation_done、失败推 generation_failed 给该用户在线的「打电话」连接。
+    没有连接就静默——聊天端拿着 job_id 轮询 /v1/generation-tasks/{id} 兜底。
+
+    创建时捕获当前请求/连接的 base URL：executor 线程不继承 ContextVar，
+    不带过去的话推送里的 streamUrl 会落回配置兜底地址（换 IP 就废）。"""
+    request_base_url = get_request_base_url()
 
     def _callback(_future) -> None:
         try:
+            if request_base_url:
+                set_request_base_url(request_base_url)
             job = state.repository.get_generation_job(job_id)
-            if job is None or job.status != "succeeded" or job.asset is None:
+            if job is None:
+                return
+            if job.status != "succeeded" or job.asset is None:
+                if job.status == "failed":
+                    _push_realtime_event(
+                        user_id,
+                        {"type": "generation_failed", "jobId": job_id,
+                         "message": "刚才的音频没做成功，要不换个说法再试试？"},
+                    )
                 return
             job.asset.playback_url = state.storage.public_url(job.asset.object_key)
             _push_realtime_event(
@@ -869,7 +894,10 @@ def _job_done_notifier(user_id: str, job_id: str):
                 },
             )
         except Exception:  # noqa: BLE001 — 通知失败绝不能影响任务本身
-            logger.warning("generation_done notify failed for job %s", job_id, exc_info=True)
+            logger.warning("generation notify failed for job %s", job_id, exc_info=True)
+        finally:
+            if request_base_url:
+                set_request_base_url(None)
 
     return _callback
 
@@ -915,13 +943,20 @@ def voice_intent(payload: VoiceIntentIn):
     if response.action == "generate_job" and response.job_id:
         # 生成完全异步：立即返回承诺，不占用对话回合。完成后 done-callback 会
         # 通知在线的通话连接；聊天端拿 job_id 轮询。原子抢占保证重试不双跑。
-        future = _generation_executor.submit(
-            _run_generation_job_safely,
-            response.job_id,
-            payload.user_id,
-            GenerationRequest(request_text=text, force_generate=True),
+        # in_flight = 首次入队的那个 worker 正在跑——再提交只会占着线程睡等，
+        # 完成时还会重复推一次 generation_done（用户听到两遍播报）。
+        in_flight = any(
+            call.name == "generate_sleep_audio" and (call.output or {}).get("match_type") == "in_flight"
+            for call in response.tool_calls
         )
-        future.add_done_callback(_job_done_notifier(payload.user_id, response.job_id))
+        if not in_flight:
+            future = _generation_executor.submit(
+                _run_generation_job_safely,
+                response.job_id,
+                payload.user_id,
+                GenerationRequest(request_text=text, force_generate=True),
+            )
+            future.add_done_callback(_job_done_notifier(payload.user_id, response.job_id))
         reply = response.reply or "好呀，我这就去为你准备，做好了马上叫你。"
         return {
             "action": "generate_job",
@@ -997,10 +1032,11 @@ async def speech_stream_ws(websocket: WebSocket):
                 return
             yield chunk
 
-    # 服务端 VAD：转写文本 1.2s 无变化 = 用户说完了，主动推 final（客户端
-    # 收到即结束会话）。只在已有文本时触发——没开口不推空 final，留给客户端
-    # 3s 兜底。与通话链路豆包 end_smooth_window_ms=1200 保持一致。
-    vad_silence_sec = 1.2
+    # 服务端 VAD：转写文本 1.5s 无变化 = 用户说完了，主动推 final（客户端
+    # 收到即结束会话）。只在已有文本时触发——没开口不推空 final。1.5s 比
+    # 通话链路的 1.2s 宽一点：Home 语音是"下指令"场景，句中犹豫多，切早了
+    # 半句话会被直接提交执行。
+    vad_silence_sec = 1.5
     loop = asyncio.get_running_loop()
     vad_state = {"text": "", "changed_at": 0.0}
     final_sent = asyncio.Event()
@@ -1209,6 +1245,7 @@ def mobile_recommend(profile: dict):
 class MobileGenerationTaskIn(BaseModel):
     prompt: str = Field(min_length=2, max_length=1000)
     profile: dict | None = None
+    user_id: str | None = None  # 不传则落到共享演示账户（旧版 App 兼容）
 
 
 def _generation_task_view(job_id: str) -> dict:
@@ -1239,14 +1276,15 @@ def _generation_task_view(job_id: str) -> dict:
 
 @app.post("/v1/generation-tasks")
 def mobile_create_generation_task(payload: MobileGenerationTaskIn, background_tasks: BackgroundTasks):
-    _ensure_demo_profile(_MOBILE_DEFAULT_USER)
+    user_id = payload.user_id or _MOBILE_DEFAULT_USER
+    _ensure_demo_profile(user_id)
     request = GenerationRequest(request_text=payload.prompt)
     try:
-        response = state.generation_service.enqueue_or_match(_MOBILE_DEFAULT_USER, request)
+        response = state.generation_service.enqueue_or_match(user_id, request)
     except BudgetExceededError as exc:
         raise HTTPException(status_code=429, detail=str(exc)) from exc
     if response.status == "queued":
-        background_tasks.add_task(state.generation_service.run_job, response.job_id, _MOBILE_DEFAULT_USER, request)
+        background_tasks.add_task(state.generation_service.run_job, response.job_id, user_id, request)
     return _generation_task_view(response.job_id)
 
 
@@ -1412,6 +1450,8 @@ class _RealtimeConn:
     loop: asyncio.AbstractEventLoop
     user_id: str
     intent_inflight: bool = False
+    # 在途识别期间用户又点播了别的 —— 存最新一条，识别完接着派（不再静默丢弃）
+    pending_text: str | None = None
 
 
 _realtime_conns: dict[str, _RealtimeConn] = {}
@@ -1448,8 +1488,11 @@ def _looks_like_audio_request(text: str) -> bool:
 async def _maybe_dispatch_audio_intent(conn: _RealtimeConn, text: str) -> None:
     """通话内意图旁路：豆包端到端没有 function calling，由代理层从 ASR 文本
     识别「想听」并派单给后台生成/匹配。与豆包的对话回复并行，绝不阻塞通话；
-    同一连接同时最多一个在途识别，防止连续几句重复触发。"""
-    if conn.intent_inflight or not _looks_like_audio_request(text):
+    同一连接同时最多一个在途识别，识别期间的新请求排队（只留最新）接着派。"""
+    if not _looks_like_audio_request(text):
+        return
+    if conn.intent_inflight:
+        conn.pending_text = text
         return
     conn.intent_inflight = True
     try:
@@ -1473,18 +1516,28 @@ async def _maybe_dispatch_audio_intent(conn: _RealtimeConn, text: str) -> None:
             await conn.websocket.send_text(
                 json.dumps({"type": "generation_started", "jobId": response.job_id}, ensure_ascii=False)
             )
-            future = _generation_executor.submit(
-                _run_generation_job_safely,
-                response.job_id,
-                conn.user_id,
-                GenerationRequest(request_text=text, force_generate=True),
+            # in_flight = 这个 job 已有 worker 在跑（用户换个说法又要了一遍）：
+            # 不再重复提交（占线程 + 完成时重复推送），完成通知由首次提交的回调负责
+            in_flight = any(
+                call.name == "generate_sleep_audio" and (call.output or {}).get("match_type") == "in_flight"
+                for call in response.tool_calls
             )
-            future.add_done_callback(_job_done_notifier(conn.user_id, response.job_id))
+            if not in_flight:
+                future = _generation_executor.submit(
+                    _run_generation_job_safely,
+                    response.job_id,
+                    conn.user_id,
+                    GenerationRequest(request_text=text, force_generate=True),
+                )
+                future.add_done_callback(_job_done_notifier(conn.user_id, response.job_id))
         # chat / no_match：豆包已经在对话层接住了，这里什么都不做
     except Exception:  # noqa: BLE001 — 旁路失败不影响通话本身
         logger.warning("call-path intent dispatch failed for %s", conn.user_id, exc_info=True)
     finally:
         conn.intent_inflight = False
+        if conn.pending_text:
+            queued, conn.pending_text = conn.pending_text, None
+            asyncio.create_task(_maybe_dispatch_audio_intent(conn, queued))
 
 
 @app.websocket("/voice/realtime")

@@ -59,11 +59,14 @@ class LibraryService:
 
     def agent_candidates(self) -> list[AudioAsset]:
         """Candidate catalog for the Hermes decision layer: curated first,
-        newest-first within each tier, capped."""
+        newest-first within each tier, capped. 用户上传是私人内容，绝不进
+        全局候选（否则 A 的私人录音可能被推荐给 B）。"""
         assets = [
             asset
             for asset in self._repo.list_assets()
-            if not is_placeholder_created_by(asset.created_by) and self._has_local_file(asset)
+            if not is_placeholder_created_by(asset.created_by)
+            and self._has_local_file(asset)
+            and "upload" not in (asset.tags or [])
         ]
         assets.sort(key=lambda asset: (asset.tier != TIER_CURATED, -asset.created_at.timestamp()))
         assets = assets[: self._settings.hermes_catalog_limit]
