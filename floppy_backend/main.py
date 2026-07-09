@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
-from concurrent.futures import TimeoutError as FutureTimeoutError
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from pathlib import Path
 import asyncio
 import json
@@ -142,6 +142,7 @@ async def lifespan(app: FastAPI):
         normalizer=RequestNormalizer(),
         script_service=SleepScriptService(script_writer=script_writer),
         settings=settings,
+        directive_planner=directive_planner,
     )
     state.remix_service = RemixService(repository, storage)
     state.agent_runtime = HermesAgentRuntime(
@@ -160,6 +161,8 @@ async def lifespan(app: FastAPI):
         seed_assets(repository, storage)
     except Exception:  # noqa: BLE001 — seeding is best-effort at startup
         pass
+    # 预热兜底播报语音（固定文案），之后所有播报零延迟命中文件缓存
+    _reply_tts_executor.submit(_notify_audio_url)
     yield
     conn.close()
 
@@ -837,13 +840,47 @@ def _run_generation_job_safely(job_id: str, user_id: str, request: GenerationReq
             return None
 
 
+NOTIFY_LINE_TEXT = "刚刚你想听的音频生成完成了，现在来听听吧"
+
+
+def _notify_audio_url() -> str | None:
+    """兜底播报语音。文案固定 → 首次合成后按文本哈希永久缓存，之后零延迟。"""
+    return _reply_audio_url(NOTIFY_LINE_TEXT)
+
+
+def _job_done_notifier(user_id: str, job_id: str):
+    """executor future 的 done-callback（跑在生成线程里）：任务成功时把
+    generation_done 推给该用户在线的「打电话」连接。没有连接就静默——
+    聊天端拿着 job_id 轮询 /v1/generation-tasks/{id} 兜底。"""
+
+    def _callback(_future) -> None:
+        try:
+            job = state.repository.get_generation_job(job_id)
+            if job is None or job.status != "succeeded" or job.asset is None:
+                return
+            job.asset.playback_url = state.storage.public_url(job.asset.object_key)
+            _push_realtime_event(
+                user_id,
+                {
+                    "type": "generation_done",
+                    "jobId": job_id,
+                    "audio": _audio_item(job.asset),
+                    "notifyAudioUrl": _notify_audio_url(),
+                },
+            )
+        except Exception:  # noqa: BLE001 — 通知失败绝不能影响任务本身
+            logger.warning("generation_done notify failed for job %s", job_id, exc_info=True)
+
+    return _callback
+
+
 @app.post("/voice/intent")
 def voice_intent(payload: VoiceIntentIn):
     """Unified text/voice intent for Home & Chat.
 
-    Synchronous by design (hackathon): a cache/catalog hit returns instantly;
-    a generation runs inline (~10-25s with real TTS) so the frontend never
-    polls — one request, one playable answer.
+    前后台双流程：缓存/目录命中立即返回可播音频；需要生成时不再同步等待——
+    立即返回 action=generate_job + job_id + notify_audio_url，生成在后台跑，
+    客户端轮询 /v1/generation-tasks/{id}，成功后播兜底语音再自动播放。
     """
     echo = {
         "conversationId": payload.conversationId,
@@ -875,41 +912,29 @@ def voice_intent(payload: VoiceIntentIn):
         return {"action": "chat", "reply": reply, "replyAudioUrl": _reply_audio_url(reply), "audio": None, **echo}
 
     asset = response.asset
-    generated_now = False
     if response.action == "generate_job" and response.job_id:
-        # Run the generation with a hard wall-clock budget so the app's 60s
-        # request timeout never fires. On budget overrun the job keeps running
-        # in its thread (it lands in the library; the atomic claim prevents a
-        # duplicate if the user retries) and we answer with a gentle heads-up.
+        # 生成完全异步：立即返回承诺，不占用对话回合。完成后 done-callback 会
+        # 通知在线的通话连接；聊天端拿 job_id 轮询。原子抢占保证重试不双跑。
         future = _generation_executor.submit(
             _run_generation_job_safely,
             response.job_id,
             payload.user_id,
             GenerationRequest(request_text=text, force_generate=True),
         )
-        try:
-            job = future.result(timeout=45)
-        except FutureTimeoutError:
-            reply = "这段内容做起来要多花一点时间，做好了会出现在你的列表里，稍等一下再来看看好吗？"
-            return {"action": "chat", "reply": reply, "replyAudioUrl": _reply_audio_url(reply), "audio": None, **echo}
-        if job and job.status == "succeeded" and job.asset:
-            asset = job.asset
-            asset.playback_url = state.storage.public_url(asset.object_key)
-            generated_now = True
-        elif job and job.status in {"generating", "queued"}:
-            # Another worker is still on it — same story as the timeout case.
-            reply = "这段内容做起来要多花一点时间，做好了会出现在你的列表里，稍等一下再来看看好吗？"
-            return {"action": "chat", "reply": reply, "replyAudioUrl": _reply_audio_url(reply), "audio": None, **echo}
-        else:
-            # Failed (or vanished): never hand back a promise for audio that will never arrive.
-            reply = "抱歉，刚才没做成功……要不换个说法，再让我试一次？"
-            return {"action": "no_match", "reply": reply, "replyAudioUrl": _reply_audio_url(reply), "audio": None, **echo}
+        future.add_done_callback(_job_done_notifier(payload.user_id, response.job_id))
+        reply = response.reply or "好呀，我这就去为你准备，做好了马上叫你。"
+        return {
+            "action": "generate_job",
+            "reply": reply,
+            "replyAudioUrl": _reply_audio_url(reply),
+            "audio": None,
+            "job_id": response.job_id,
+            "notify_audio_url": _notify_audio_url(),
+            **echo,
+        }
 
     if asset is not None:
-        if generated_now:
-            reply = f"我为你专门做了一段新的音频：《{asset.title}》，希望你喜欢。"
-        else:
-            reply = response.reply or f"我给你找了一段适合现在听的音频：《{asset.title}》。"
+        reply = response.reply or f"我给你找了一段适合现在听的音频：《{asset.title}》。"
         return {"action": "play_asset", "reply": reply, "replyAudioUrl": _reply_audio_url(reply), "audio": _audio_item(asset), **echo}
 
     no_match_reply = response.reply or "暂时没有找到合适的内容，换个说法再试试？"
@@ -972,23 +997,56 @@ async def speech_stream_ws(websocket: WebSocket):
                 return
             yield chunk
 
+    # 服务端 VAD：转写文本 1.2s 无变化 = 用户说完了，主动推 final（客户端
+    # 收到即结束会话）。只在已有文本时触发——没开口不推空 final，留给客户端
+    # 3s 兜底。与通话链路豆包 end_smooth_window_ms=1200 保持一致。
+    vad_silence_sec = 1.2
+    loop = asyncio.get_running_loop()
+    vad_state = {"text": "", "changed_at": 0.0}
+    final_sent = asyncio.Event()
+
+    async def _send_final(text: str) -> None:
+        if final_sent.is_set():
+            return
+        final_sent.set()
+        try:
+            await websocket.send_text(json.dumps({"type": "final", "text": text}, ensure_ascii=False))
+        except Exception:  # noqa: BLE001 — client may already be gone
+            pass
+
     async def _recognize() -> None:
         last_text = ""
         try:
             async for result in asr.stream_recognize(_audio_iter()):
-                if result.text:
+                if result.text and result.text != last_text:
                     last_text = result.text
+                    vad_state["text"] = result.text
+                    vad_state["changed_at"] = loop.time()
                     await websocket.send_text(
                         json.dumps({"type": "partial", "text": result.text}, ensure_ascii=False)
                     )
-            await websocket.send_text(json.dumps({"type": "final", "text": last_text}, ensure_ascii=False))
+            await _send_final(last_text)
         except Exception as exc:  # noqa: BLE001 — surface ASR failures to the client
             try:
                 await websocket.send_text(json.dumps({"type": "error", "message": str(exc)}, ensure_ascii=False))
             except Exception:  # noqa: BLE001
                 pass
 
+    async def _vad_watch() -> None:
+        while not final_sent.is_set():
+            await asyncio.sleep(0.15)
+            changed_at = vad_state["changed_at"]
+            if vad_state["text"] and changed_at and loop.time() - changed_at >= vad_silence_sec:
+                await _send_final(vad_state["text"])
+                await queue.put(None)  # 结束识别流
+                try:
+                    await websocket.close()
+                except Exception:  # noqa: BLE001
+                    pass
+                return
+
     recognize_task = asyncio.create_task(_recognize())
+    vad_task = asyncio.create_task(_vad_watch())
     try:
         while True:
             message = await websocket.receive()
@@ -1019,6 +1077,7 @@ async def speech_stream_ws(websocket: WebSocket):
     except WebSocketDisconnect:
         pass
     finally:
+        vad_task.cancel()
         await queue.put(None)
         if not recognize_task.done():
             try:
@@ -1171,7 +1230,11 @@ def _generation_task_view(job_id: str) -> dict:
         "Success": "音频已生成",
         "Failed": "生成失败了，请稍后再试一次",
     }[status]
-    return {"id": job.id, "status": status, "message": message, "audio": audio}
+    view = {"id": job.id, "status": status, "message": message, "audio": audio}
+    if status == "Success":
+        # 兜底播报语音（固定文案，永久缓存）——客户端先播这句再自动播放 audio
+        view["notify_audio_url"] = _notify_audio_url()
+    return view
 
 
 @app.post("/v1/generation-tasks")
@@ -1341,6 +1404,89 @@ def _reply_audio_url(reply: str) -> str | None:
         return None
 
 
+@dataclass
+class _RealtimeConn:
+    """一个在线的「打电话」连接。注册表按 user_id 存最后一个连接（后连的赢）。"""
+
+    websocket: WebSocket
+    loop: asyncio.AbstractEventLoop
+    user_id: str
+    intent_inflight: bool = False
+
+
+_realtime_conns: dict[str, _RealtimeConn] = {}
+
+
+def _push_realtime_event(user_id: str, payload: dict) -> bool:
+    """线程安全推送（供生成线程的 done-callback 调用）。连接不在返回 False。"""
+    conn = _realtime_conns.get(user_id)
+    if conn is None:
+        return False
+    try:
+        future = asyncio.run_coroutine_threadsafe(
+            conn.websocket.send_text(json.dumps(payload, ensure_ascii=False)), conn.loop
+        )
+        future.result(timeout=5)
+        return True
+    except Exception:  # noqa: BLE001 — 连接可能刚断；聊天端有轮询兜底
+        return False
+
+
+# 通话内「想听」旁路的关键词初筛：触发词 + 常见音频类型词（对齐 normalizer 词表）。
+_AUDIO_INTENT_TRIGGERS = (
+    "想听", "来一段", "来一个", "来点", "放个", "放一段", "放点", "播放", "播一",
+    "生成", "做一个", "做一段", "换一个", "换个", "讲个故事", "讲一个故事",
+    "白噪音", "雨声", "海浪", "风声", "冥想", "asmr", "助眠音", "催眠曲", "摇篮曲",
+)
+
+
+def _looks_like_audio_request(text: str) -> bool:
+    lowered = text.lower()
+    return any(keyword in lowered for keyword in _AUDIO_INTENT_TRIGGERS)
+
+
+async def _maybe_dispatch_audio_intent(conn: _RealtimeConn, text: str) -> None:
+    """通话内意图旁路：豆包端到端没有 function calling，由代理层从 ASR 文本
+    识别「想听」并派单给后台生成/匹配。与豆包的对话回复并行，绝不阻塞通话；
+    同一连接同时最多一个在途识别，防止连续几句重复触发。"""
+    if conn.intent_inflight or not _looks_like_audio_request(text):
+        return
+    conn.intent_inflight = True
+    try:
+        # 通话用户可能从没建过画像 —— decide 里的 _profile_context 会直接抛错
+        await asyncio.to_thread(_ensure_demo_profile, conn.user_id)
+        response = await asyncio.to_thread(
+            state.agent_runtime.run,
+            AgentDecideRequest(user_id=conn.user_id, request_text=text, generation_allowed=True),
+        )
+        if response.action == "play_asset" and response.asset is not None:
+            # 缓存/目录直接命中 —— 立即通知，客户端在轮次间隙播报
+            response.asset.playback_url = state.storage.public_url(response.asset.object_key)
+            payload = {
+                "type": "generation_done",
+                "jobId": None,
+                "audio": _audio_item(response.asset),
+                "notifyAudioUrl": await asyncio.to_thread(_notify_audio_url),
+            }
+            await conn.websocket.send_text(json.dumps(payload, ensure_ascii=False))
+        elif response.action == "generate_job" and response.job_id:
+            await conn.websocket.send_text(
+                json.dumps({"type": "generation_started", "jobId": response.job_id}, ensure_ascii=False)
+            )
+            future = _generation_executor.submit(
+                _run_generation_job_safely,
+                response.job_id,
+                conn.user_id,
+                GenerationRequest(request_text=text, force_generate=True),
+            )
+            future.add_done_callback(_job_done_notifier(conn.user_id, response.job_id))
+        # chat / no_match：豆包已经在对话层接住了，这里什么都不做
+    except Exception:  # noqa: BLE001 — 旁路失败不影响通话本身
+        logger.warning("call-path intent dispatch failed for %s", conn.user_id, exc_info=True)
+    finally:
+        conn.intent_inflight = False
+
+
 @app.websocket("/voice/realtime")
 async def voice_realtime_ws(websocket: WebSocket):
     """「和 Floppy 打电话」— 豆包端到端实时语音的代理通道（纯陪聊模式）。
@@ -1394,6 +1540,8 @@ async def voice_realtime_ws(websocket: WebSocket):
         if evt.event != vr.EV_SESSION_STARTED:
             raise RuntimeError(f"session start failed {evt.event}: {evt.json()}")
         await _emit({"type": "ready", "dialogId": evt.json().get("dialog_id", "")})
+        conn = _RealtimeConn(websocket=websocket, loop=asyncio.get_running_loop(), user_id=user_id)
+        _realtime_conns[user_id] = conn
     except asyncio.TimeoutError:
         await _safe_emit({"type": "error", "message": "通话接通失败，请稍后再试"})
         await upstream.close()
@@ -1426,7 +1574,12 @@ async def voice_realtime_ws(websocket: WebSocket):
                 elif evt.event == vr.EV_ASR_RESPONSE:
                     results = evt.json().get("results") or []
                     if results:
-                        await _emit({"type": "asr", "text": results[0].get("text", ""), "interim": bool(results[0].get("is_interim"))})
+                        asr_text = str(results[0].get("text", ""))
+                        is_interim = bool(results[0].get("is_interim"))
+                        await _emit({"type": "asr", "text": asr_text, "interim": is_interim})
+                        if not is_interim and asr_text:
+                            # 意图旁路：并行识别「想听」，不阻塞对话
+                            asyncio.create_task(_maybe_dispatch_audio_intent(conn, asr_text))
                 elif evt.event == vr.EV_CHAT_RESPONSE:
                     await _emit({"type": "chat", "text": evt.json().get("content", "")})
                 elif evt.event == vr.EV_TTS_ENDED:
@@ -1470,7 +1623,8 @@ async def voice_realtime_ws(websocket: WebSocket):
                 if ctrl.get("type") == "stop":
                     break
                 if ctrl.get("type") == "text_query" and ctrl.get("text"):
-                    # 文本旁路（调试/无麦克风环境用）
+                    # 文本旁路（调试/无麦克风环境用）—— 和真实语音一样过意图旁路
+                    asyncio.create_task(_maybe_dispatch_audio_intent(conn, str(ctrl["text"])))
                     try:
                         await upstream.send(vr.chat_text_query_frame(session_id, str(ctrl["text"])))
                     except Exception:  # noqa: BLE001 — upstream already closed
@@ -1478,6 +1632,8 @@ async def voice_realtime_ws(websocket: WebSocket):
     except WebSocketDisconnect:
         pass
     finally:
+        if _realtime_conns.get(user_id) is conn:
+            del _realtime_conns[user_id]
         try:
             await upstream.send(vr.finish_session_frame(session_id))
             await upstream.send(vr.finish_connection_frame())

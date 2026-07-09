@@ -452,12 +452,9 @@ class HermesAgentRuntime:
             )
 
         self._gen.check_generation_budget(request.user_id)
+        # 只用 Hermes 自己给出的 directive；缺失时由后台 worker 补规划
+        # （run_job 内），决策路径不再同步等 12s 的规划 LLM —— 前台必须秒回。
         directive = decision.directive
-        if directive is None and self._directive_planner is not None:
-            try:
-                directive = self._directive_planner.plan(request.request_text, profile_context)
-            except Exception:  # noqa: BLE001 — directive is best-effort
-                directive = None
         generate_started = time.perf_counter()
         generation_request = GenerationRequest(
             request_text=request.request_text,
@@ -581,8 +578,8 @@ _HERMES_DECISION_INSTRUCTIONS = """
 
 可选 action：
 - chat：用户在闲聊、倾诉、提问，没有想听内容的意图。reply 就是你的聊天回复：先共情、接住情绪，可以自然聊下去；只有当用户表露睡不着/焦虑时才顺势轻轻提一句"要不要听点什么"，不要每轮都推销。
-- play_asset：用户想听内容（点名要，或对话里明确表达想要声音陪伴），且 catalog 里有真正合适的资产。必须填写 asset_id，且严格来自 catalog；宁可 generate_job 也不要拿勉强沾边的凑数。reply 例："给你放一段《夜雨轻敲》，闭上眼睛听听看。"
-- generate_job：想听的内容 catalog 里没有，需要现场生成（generation_allowed=false 时禁止）。reply 要告知正在专门为 TA 制作，需要等一小会儿。
+- play_asset：用户想听内容（点名要，或对话里明确表达想要声音陪伴），且 catalog 里有合适或相近的资产。必须填写 asset_id，且严格来自 catalog。**库优先**：现成资产即点即播，生成要让用户等一两分钟——同类型且意象相近就直接播（想听海浪→《夜海浪涌》，想听雨→任一雨声资产）。reply 例："给你放一段《夜雨轻敲》，闭上眼睛听听看。"
+- generate_job：想听的内容 catalog 里确实没有同类或相近的（把 catalog 从头到尾看完再下结论），才现场生成（generation_allowed=false 时禁止）。意象完全无关的不要硬凑——想听火车声不要拿雨声顶。reply 要告知正在专门为 TA 制作，需要等一小会儿。
 - remix_current：用户想给 current_asset_id 对应的当前音频加/换/调背景音。必须存在 current_asset_id。
 - no_match：想听但既无合适资产也不能生成。reply 温柔致歉并给个替代建议。
 
@@ -590,8 +587,8 @@ _HERMES_DECISION_INSTRUCTIONS = """
 
 匹配判断要点：
 - 以用户这句话的真实意图为准（内容类型、意象、时长、声音风格），profile 只是辅助偏好；结合对话上下文（比如上一轮你刚推荐过什么）。
-- 用户点名的意象（如"海边""篝火"）catalog 里没有就 generate_job，不要用无关资产凑数。
-- duration_sec 与用户要求相差过大视为不匹配。
+- 先在 catalog 里找同类意象：点名"海边/篝火/雨声"这类元素时，catalog 里有对应或相近意象的资产就直接播；确实没有同类才 generate_job，绝不用无关意象凑数。
+- duration_sec 与用户明确要求相差过大视为不匹配；用户没提时长就不要因时长排除。
 
 如果选择 generate_job，尽量填写 directive：
 - intent: white_noise | music | asmr | story | meditation | podcast_digest
