@@ -394,6 +394,23 @@ class Repository:
             created = self.conn.execute("SELECT * FROM generation_jobs WHERE id = ?", (job_id,)).fetchone()
             return self._job_from_row(created), True
 
+    def fail_stale_generation_jobs(self) -> int:
+        """启动时清扫孤儿任务：上次进程被杀时卡在 queued/generating 的行会
+        永远吸走同 cache_key 的后续请求（入队去重命中僵尸 → 用户被无限承诺）。
+        重启后没有任何在跑的 worker，这些行必然是孤儿，统一标记失败以便重试。"""
+        with self._lock:
+            cursor = self.conn.execute(
+                """
+                UPDATE generation_jobs
+                SET status = 'failed', error_message = 'orphaned: server restarted mid-generation',
+                    updated_at = ?
+                WHERE status IN ('queued', 'generating')
+                """,
+                (utcnow().isoformat(),),
+            )
+            self.conn.commit()
+            return cursor.rowcount
+
     def claim_job_for_run(self, job_id: str) -> bool:
         """Atomically claim a job for execution. Returns False when the job is
         already generating (someone else runs it) or already succeeded —

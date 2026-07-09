@@ -1,8 +1,9 @@
 # Home / Chat 对接文档（移动端）
 
-> Base URL（当前联调）：`http://172.22.159.11:8000`（后端开发机 LAN 地址，手机需与其在同一 Wi-Fi）
-> 上公网 / 换网络后 Base URL 会变，以后端同学通知为准；音频 `streamUrl` 由后端按当前 Base URL 生成，前端不要自己拼。
-> 编码：`application/json; charset=utf-8`；MVP 无鉴权，`user_id` 由客户端本地生成并保持稳定。
+> Base URL：本地联调用后端开发机 LAN 地址（换 Wi-Fi 会变，以 `ipconfig getifaddr en0` 为准）；
+> 服务器环境固定为 `https://8000-i7qtsep0.agent-sandbox.baidu-int.com`（WS 用 `wss://`）。
+> 音频 `streamUrl` 由后端按客户端实际访问的 Host 动态生成，前端不要自己拼。
+> 编码：`application/json; charset=utf-8`；MVP 无鉴权，`user_id` 由客户端本地生成并保持稳定（**HTTP 与通话 WS 必须传同一个**，否则通话内的完成推送收不到）。
 
 以下 4 个接口均已实现并联调通过。
 
@@ -12,7 +13,7 @@
 
 Chat 发文字（`source="chat"`）和 Home 语音识别完成后（`source="voice"`）都调这个。
 
-**同步接口**：命中已有音频立即返回；需要现场生成时后端同步等待生成完成（真人声约 10–25 秒），前端**无需轮询**，但请把请求超时设到 **60 秒** 并在 UI 上做等待态。
+**秒回接口（生成已异步化）**：库内命中直接返回可播音频（数秒）；需要现场生成时**不再同步等待**——立即返回 `action=generate_job` + `job_id`，之后按下表的 `job_id` 说明轮询取结果。请求超时 30 秒足够；聊天期间照常可继续对话。
 
 请求：
 
@@ -28,7 +29,7 @@ Chat 发文字（`source="chat"`）和 Home 语音识别完成后（`source="voi
 }
 ```
 
-响应（`action` 只有两种）：
+响应（`action` 共四种，见下表）：
 
 ```json
 {
@@ -87,7 +88,8 @@ Chat 发文字（`source="chat"`）和 Home 语音识别完成后（`source="voi
    { "type": "error",   "message": "xxx" }
    ```
 
-**final 触发时机（服务端 VAD）**：转写文本 **1.2 秒**无变化即判定用户说完，服务端**主动**推 `final` 并关连接——正常情况下无需客户端发 stop。注意：用户从未开口（无任何转写文本）时不会推 VAD final，请保留客户端静音兜底（当前 3s，与 1.2s 距离充分，无需调整）。`{"type":"stop"}` 仍然全量支持：收到后立即结束识别并回一条 `final`（只会推一次，VAD 已推过则 stop 不重复推）。
+**final 触发时机（服务端 VAD）**：转写文本 **1.5 秒**无变化即判定用户说完，服务端**主动**推 `final` 并关连接——正常情况下无需客户端发 stop。（比通话链路的 1.2s 稍宽：Home 语音是下指令场景，切太早会把犹豫中的半句话直接提交执行。）`{"type":"stop"}` 仍然全量支持：收到后立即结束识别并回一条 `final`（只会推一次，VAD 已推过则 stop 不重复推）。
+⚠️ 用户从未开口（无任何转写文本）时**不会**推 VAD final——请前端确认有"开麦后长时间无语音自动收麦"的兜底（据我们读代码目前只有松手后 6s 看门狗，开麦不说话不会自动结束，建议补一个 ~10s 的无语音超时）。
 
 `partial.text` 是**累积全文**（不是增量），直接整体替换显示即可。拿到 `final.text` 后再调 `/voice/intent`（`source="voice"`）。
 
@@ -119,8 +121,8 @@ Chat 发文字（`source="chat"`）和 Home 语音识别完成后（`source="voi
 
 ```json
 {
-  "recommended": [ AudioItem, ... ],   // 音频目录，最新在前
-  "uploads": [],                        // 用户上传功能未上线，恒为空数组
+  "recommended": [ AudioItem, ... ],   // 精选池，按画像规则排序 + 类型穿插
+  "uploads": [ AudioItem, ... ],        // 该用户自己上传的音频（未上传过则为空数组）
   "history": [ AudioItem, ... ]         // 播放历史，AudioItem.playbackProgress 为上次进度 0~1
 }
 ```
@@ -143,6 +145,7 @@ Chat 发文字（`source="chat"`）和 Home 语音识别完成后（`source="voi
 **通话中点播/生成（新）**：后端代理会从用户的话里识别「想听 XX」并自动派单，前端无需发任何请求：
 - `{"type":"generation_started","jobId"}` — 已开始后台生成（豆包会口头承诺「我去准备，好了叫你」，继续陪聊）
 - `{"type":"generation_done","jobId","audio":{AudioItem},"notifyAudioUrl"}` — 做好了（缓存命中则秒到，此时 `jobId` 为 null）。客户端建议流程：等下一个 `tts_end` 轮次边界 → **温柔自动挂断** → 播 `notifyAudioUrl` → 自动播放 `audio`。若用户提前挂断且只收到过 `generation_started`，拿 `jobId` 轮询 `GET /v1/generation-tasks/{jobId}` 兜底
+- `{"type":"generation_failed","jobId","message"}` — 没做成功（豆包承诺过就不能放鸽子）。客户端可轻提示 `message`；未处理该事件也不影响其他功能
 
 ## 推荐接入流程
 
@@ -172,7 +175,7 @@ Chat 文字   → POST /voice/intent (source=chat)
 
 ## 已知约束
 
-- `/voice/intent` 生成路径最长约 25s，务必做等待 UI + 60s 超时。
-- `coverUrl` 恒为 null；`uploads` 恒为空数组（本期无上传功能）。
+- `/voice/intent` 已异步化：生成路径秒回 `generate_job`，结果靠轮询/通话推送取，请求超时 30s 足够。
+- `coverUrl` 恒为 null；上传的音频只出现在上传者自己的 `uploads` 里（不会进入推荐/智能体候选）。
 - 决策依赖 Hermes 智能体服务；Hermes 未启动时非缓存请求返回 `no_match`（接口不报错）。
 - 无鉴权，仅限内网联调，勿把 Base URL 暴露到公网。
