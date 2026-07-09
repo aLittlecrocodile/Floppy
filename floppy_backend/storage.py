@@ -1,6 +1,18 @@
 from __future__ import annotations
 
+from contextvars import ContextVar
 from pathlib import Path, PurePosixPath
+
+# Base URL of the *current* HTTP request (set by middleware in main.py).
+# Minting playback URLs from the host the client actually used means a phone
+# reaching the backend on any LAN IP gets stream URLs it can play back —
+# the configured FLOPPY_PUBLIC_BASE_URL is only the fallback (background
+# jobs, websockets, scripts).
+_request_base_url: ContextVar[str | None] = ContextVar("floppy_request_base_url", default=None)
+
+
+def set_request_base_url(base_url: str | None) -> None:
+    _request_base_url.set(base_url.rstrip("/") if base_url else None)
 
 
 class LocalFileStorage:
@@ -18,7 +30,8 @@ class LocalFileStorage:
         return self._safe_path(object_key)
 
     def public_url(self, object_key: str) -> str:
-        return f"{self.public_base_url}/audio/{object_key.lstrip('/')}"
+        base = _request_base_url.get() or self.public_base_url
+        return f"{base}/audio/{object_key.lstrip('/')}"
 
     def _safe_path(self, object_key: str) -> Path:
         clean = PurePosixPath(object_key.lstrip("/"))

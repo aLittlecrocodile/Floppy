@@ -103,6 +103,10 @@ class Settings(BaseSettings):
     # /voice/ws shared-secret (PoC auth; replace with platform auth in prod)
     voice_ws_token: str | None = None
 
+    # --- Logging ---
+    log_level: str = "INFO"          # DEBUG | INFO | WARNING | ERROR
+    log_dir: str = "logs"            # rotating file lives here (logs/floppy.log)
+
     model_config = SettingsConfigDict(env_prefix="FLOPPY_", env_file=".env")
 
 

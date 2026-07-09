@@ -337,6 +337,8 @@ class TestHermesDecisionLayer:
                     created_by="ondemand",
                 )
             )
+            # Catalog pools skip assets whose file is missing — write a dummy.
+            state.storage.path_for("ondemand/test/breath.mp3").write_bytes(b"\x00")
 
             # Hermes autonomously picks an asset — no score threshold gate.
             asset = state.agent_runtime._catalog_candidates()[0]

@@ -79,7 +79,9 @@ class HermesAgentClient:
         self._responses_url = f"{self._base_url}/responses" if self._base_url.endswith("/v1") else f"{self._base_url}/v1/responses"
         self._api_key = settings.hermes_api_key
         self._model = settings.hermes_model
-        self._timeout = settings.hermes_timeout_sec
+        # connect=3s: a black-holed Hermes must fail fast (3s, not 30s);
+        # the configured timeout still governs read/write/pool.
+        self._timeout = httpx.Timeout(settings.hermes_timeout_sec, connect=3.0)
         self._store = settings.hermes_store_conversation
 
     def decide(
@@ -170,6 +172,8 @@ class HermesAgentRuntime:
         # and "生成助眠音频" both normalize to profile defaults), and those must
         # go to Hermes, which sees the cached asset among its candidates anyway.
         exact = self._repo.get_asset_by_prompt_hash(cache_key)
+        if exact is not None and not self._asset_file_exists(exact):
+            exact = None  # stale DB row — the audio file is gone, never serve it
         if exact is not None and self._repo.has_generation_request(cache_key, request.request_text):
             return self._exact_cache_response(request, profile_context, normalized, exact)
 
@@ -214,6 +218,12 @@ class HermesAgentRuntime:
 
     def _catalog_candidates(self) -> list[AudioAsset]:
         return self._library.agent_candidates()
+
+    def _asset_file_exists(self, asset: AudioAsset) -> bool:
+        try:
+            return self._storage.existing_path_for(asset.object_key).exists()
+        except (ValueError, OSError):
+            return False
 
     def _search_view(
         self,
@@ -293,6 +303,7 @@ class HermesAgentRuntime:
             profile_context=profile_context,
             search=self._search_view(candidates),
             asset=None,
+            reply="我这会儿有点走神了，可以再跟我说一次吗？",
             reasons=["Hermes 决策层不可用，本次请求未做匹配"],
             planner_meta=PlannerMeta(
                 planner_source="hermes",

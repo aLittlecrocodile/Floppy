@@ -1,10 +1,15 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FutureTimeoutError
 from contextlib import asynccontextmanager
 from pathlib import Path
 import asyncio
 import json
+import logging
+import socket
 import time
+import urllib.parse
 
 from fastapi import BackgroundTasks, Depends, FastAPI, File, Form, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, HTMLResponse
@@ -57,7 +62,24 @@ from floppy_backend.services.normalizer import RequestNormalizer
 from floppy_backend.services.profile import ProfileService
 from floppy_backend.services.remix import RemixService
 from floppy_backend.services.script import SleepScriptService
-from floppy_backend.storage import LocalFileStorage
+from floppy_backend.storage import LocalFileStorage, set_request_base_url
+from floppy_backend.logging_setup import AccessLogMiddleware, setup_logging
+
+# Configure console + rotating-file logging as early as possible so import-time
+# and startup messages are captured. Path/level overridable via env.
+_LOG_FILE = setup_logging(
+    level=get_settings().log_level,
+    log_dir=get_settings().log_dir,
+)
+
+logger = logging.getLogger("floppy")
+logger.info("logging initialised -> %s", _LOG_FILE)
+
+# Inline generation runs here so a sync endpoint can enforce a wall-clock
+# budget (FIX: /voice/intent must answer inside the app's 60s timeout).
+_generation_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="genjob")
+# Small dedicated pool for reply TTS so a hung MiniMax call can't stall chat turns.
+_reply_tts_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="replytts")
 
 
 class AppState:
@@ -145,6 +167,29 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="Floppy Backend MVP", version="0.1.0", lifespan=lifespan)
 
 
+class _RequestBaseURLMiddleware:
+    """Pure-ASGI middleware: record the request's own base URL so playback
+    URLs are minted on the host the client actually reached us at (a phone
+    that hit http://<lan-ip>:8000 gets stream URLs on that same IP)."""
+
+    def __init__(self, app):  # noqa: ANN001 — ASGI app
+        self.app = app
+
+    async def __call__(self, scope, receive, send):  # noqa: ANN001 — ASGI signature
+        if scope["type"] == "http":
+            headers = {key: value for key, value in scope.get("headers") or []}
+            host = headers.get(b"host", b"").decode("latin-1").strip()
+            scheme = scope.get("scheme") or "http"
+            set_request_base_url(f"{scheme}://{host}" if host else None)
+        await self.app(scope, receive, send)
+
+
+app.add_middleware(_RequestBaseURLMiddleware)
+# Access log (client IP + method + path + status + latency) -> logs/floppy.log.
+# Added last so it wraps outermost and sees the true request/response.
+app.add_middleware(AccessLogMiddleware)
+
+
 def repo() -> Repository:
     return state.repository
 
@@ -153,9 +198,24 @@ def storage() -> LocalFileStorage:
     return state.storage
 
 
+def _hermes_reachable(base_url: str, timeout: float = 2.0) -> bool:
+    try:
+        parsed = urllib.parse.urlsplit(base_url)
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+        with socket.create_connection((parsed.hostname or "127.0.0.1", port), timeout=timeout):
+            return True
+    except Exception:  # noqa: BLE001 — health probe must never raise
+        return False
+
+
 @app.get("/health")
 def health(settings: Settings = Depends(get_settings)):
-    return {"status": "ok", "app": settings.app_name}
+    return {
+        "status": "ok",
+        "app": settings.app_name,
+        "hermes": "ok" if _hermes_reachable(settings.hermes_base_url) else "down",
+        "public_base_url": settings.public_base_url,
+    }
 
 
 def _ensure_demo_profile(user_id: str) -> None:
@@ -335,7 +395,8 @@ def demo_chat(payload: dict):
     if len(request_text) < 2:
         raise HTTPException(status_code=400, detail="request_text is required")
 
-    seed_assets(state.repository, state.storage)
+    # Catalog is seeded once at startup (lifespan) — re-seeding per message
+    # added ~seconds to every chat turn for nothing.
     demo_user = "demo_user"
     state.profile_service.upsert_profile(
         demo_user,
@@ -495,13 +556,29 @@ def agent_decide(req: AgentDecideRequest, background_tasks: BackgroundTasks):
         raise
 
     if response.action == "generate_job" and response.job_id:
-        background_tasks.add_task(
-            state.generation_service.run_job,
-            response.job_id,
-            req.user_id,
-            GenerationRequest(request_text=req.request_text, force_generate=True),
+        # A job already in flight is being executed by whoever enqueued it —
+        # scheduling a second run would only tie up a worker waiting on it.
+        in_flight = any(
+            call.name == "generate_sleep_audio" and (call.output or {}).get("match_type") == "in_flight"
+            for call in response.tool_calls
         )
+        if not in_flight:
+            background_tasks.add_task(
+                state.generation_service.run_job,
+                response.job_id,
+                req.user_id,
+                GenerationRequest(request_text=req.request_text, force_generate=True),
+            )
     return response
+
+
+_AUDIO_MIME_BY_SUFFIX = {
+    ".mp3": "audio/mpeg",
+    ".m4a": "audio/mp4",
+    ".mp4": "audio/mp4",
+    ".wav": "audio/wav",
+    ".ogg": "audio/ogg",
+}
 
 
 @app.get("/audio/{object_key:path}")
@@ -512,7 +589,7 @@ def get_audio(object_key: str, file_storage: LocalFileStorage = Depends(storage)
         raise HTTPException(status_code=400, detail="invalid object key") from exc
     if not path.exists() or not path.is_file():
         raise HTTPException(status_code=404, detail="audio not found")
-    media_type = "audio/mpeg" if path.suffix.lower() == ".mp3" else "audio/wav"
+    media_type = _AUDIO_MIME_BY_SUFFIX.get(path.suffix.lower(), "application/octet-stream")
     return FileResponse(Path(path), media_type=media_type)
 
 
@@ -744,6 +821,20 @@ class VoiceIntentIn(BaseModel):
     turnIndex: int | None = None
     supersedesRequestId: str | None = None
     user_id: str = "mobile_user"
+    current_asset_id: str | None = None  # currently playing asset — enables remix_current ("给这个加点雨声")
+
+
+def _run_generation_job_safely(job_id: str, user_id: str, request: GenerationRequest):
+    """run_job wrapper for executor threads — an abandoned thread must never
+    leak an exception. Failures are logged and reflected in the job row."""
+    try:
+        return state.generation_service.run_job(job_id, user_id, request)
+    except Exception:  # noqa: BLE001 — defensive: run_job already marks failures
+        logger.exception("generation job %s crashed", job_id)
+        try:
+            return state.repository.get_generation_job(job_id)
+        except Exception:  # noqa: BLE001
+            return None
 
 
 @app.post("/voice/intent")
@@ -765,9 +856,18 @@ def voice_intent(payload: VoiceIntentIn):
         return {"action": "no_match", "reply": reply, "replyAudioUrl": _reply_audio_url(reply), "audio": None, **echo}
 
     _ensure_demo_profile(payload.user_id)
-    response = state.agent_runtime.run(
-        AgentDecideRequest(user_id=payload.user_id, request_text=text, generation_allowed=True)
-    )
+    try:
+        response = state.agent_runtime.run(
+            AgentDecideRequest(
+                user_id=payload.user_id,
+                request_text=text,
+                generation_allowed=True,
+                current_asset_id=payload.current_asset_id,
+            )
+        )
+    except BudgetExceededError:
+        reply = "今天为你做的新音频已经不少啦，先听听已经做好的，明天再来找我做新的好吗？"
+        return {"action": "no_match", "reply": reply, "replyAudioUrl": _reply_audio_url(reply), "audio": None, **echo}
 
     # Pure conversation turn — the agent chatted, nothing to play.
     if response.action == "chat":
@@ -777,14 +877,33 @@ def voice_intent(payload: VoiceIntentIn):
     asset = response.asset
     generated_now = False
     if response.action == "generate_job" and response.job_id:
-        state.generation_service.run_job(
-            response.job_id, payload.user_id, GenerationRequest(request_text=text, force_generate=True)
+        # Run the generation with a hard wall-clock budget so the app's 60s
+        # request timeout never fires. On budget overrun the job keeps running
+        # in its thread (it lands in the library; the atomic claim prevents a
+        # duplicate if the user retries) and we answer with a gentle heads-up.
+        future = _generation_executor.submit(
+            _run_generation_job_safely,
+            response.job_id,
+            payload.user_id,
+            GenerationRequest(request_text=text, force_generate=True),
         )
-        job = state.repository.get_generation_job(response.job_id)
+        try:
+            job = future.result(timeout=45)
+        except FutureTimeoutError:
+            reply = "这段内容做起来要多花一点时间，做好了会出现在你的列表里，稍等一下再来看看好吗？"
+            return {"action": "chat", "reply": reply, "replyAudioUrl": _reply_audio_url(reply), "audio": None, **echo}
         if job and job.status == "succeeded" and job.asset:
             asset = job.asset
             asset.playback_url = state.storage.public_url(asset.object_key)
             generated_now = True
+        elif job and job.status in {"generating", "queued"}:
+            # Another worker is still on it — same story as the timeout case.
+            reply = "这段内容做起来要多花一点时间，做好了会出现在你的列表里，稍等一下再来看看好吗？"
+            return {"action": "chat", "reply": reply, "replyAudioUrl": _reply_audio_url(reply), "audio": None, **echo}
+        else:
+            # Failed (or vanished): never hand back a promise for audio that will never arrive.
+            reply = "抱歉，刚才没做成功……要不换个说法，再让我试一次？"
+            return {"action": "no_match", "reply": reply, "replyAudioUrl": _reply_audio_url(reply), "audio": None, **echo}
 
     if asset is not None:
         if generated_now:
@@ -884,7 +1003,16 @@ async def speech_stream_ws(websocket: WebSocket):
                     continue
                 if ctrl.get("type") == "stop":
                     await queue.put(None)
-                    await recognize_task
+                    try:
+                        await asyncio.wait_for(recognize_task, 15)
+                    except asyncio.TimeoutError:
+                        recognize_task.cancel()
+                        try:
+                            await websocket.send_text(
+                                json.dumps({"type": "error", "message": "识别超时了，请再试一次"}, ensure_ascii=False)
+                            )
+                        except Exception:  # noqa: BLE001
+                            pass
                     break
                 # "start" is acknowledged implicitly; upstream format is fixed
                 # (16k/mono/pcm_s16le — the only format Volc ASR accepts).
@@ -920,19 +1048,23 @@ async def speech_transcriptions(
     if not shutil.which("ffmpeg"):
         raise HTTPException(status_code=500, detail="ffmpeg not available on server")
 
-    # m4a/mp4 need seekable input (moov atom) — decode from a temp file, not a pipe.
-    with tempfile.NamedTemporaryFile(suffix=Path(file.filename or "audio.m4a").suffix or ".m4a") as tmp:
-        tmp.write(data)
-        tmp.flush()
-        proc = subprocess.run(
-            [
-                "ffmpeg", "-hide_banner", "-loglevel", "error",
-                "-i", tmp.name,
-                "-f", "s16le", "-acodec", "pcm_s16le", "-ac", "1", "-ar", "16000",
-                "pipe:1",
-            ],
-            capture_output=True,
-        )
+    def _decode_to_pcm() -> subprocess.CompletedProcess:
+        # m4a/mp4 need seekable input (moov atom) — decode from a temp file, not a pipe.
+        with tempfile.NamedTemporaryFile(suffix=Path(file.filename or "audio.m4a").suffix or ".m4a") as tmp:
+            tmp.write(data)
+            tmp.flush()
+            return subprocess.run(
+                [
+                    "ffmpeg", "-hide_banner", "-loglevel", "error",
+                    "-i", tmp.name,
+                    "-f", "s16le", "-acodec", "pcm_s16le", "-ac", "1", "-ar", "16000",
+                    "pipe:1",
+                ],
+                capture_output=True,
+            )
+
+    # Off the event loop — a blocking ffmpeg run here makes live voice calls stutter.
+    proc = await asyncio.to_thread(_decode_to_pcm)
     if proc.returncode != 0 or not proc.stdout:
         raise HTTPException(status_code=400, detail=f"audio decode failed: {proc.stderr.decode()[:200]}")
     pcm = proc.stdout
@@ -1029,11 +1161,15 @@ def _generation_task_view(job_id: str) -> dict:
     if job.asset is not None:
         job.asset.playback_url = state.storage.public_url(job.asset.object_key)
         audio = _audio_item(job.asset)
+    if status == "Failed" and job.error_message:
+        # Raw provider errors (e.g. "MiniMax HTTP 401: ...") stay in the logs,
+        # never in the app.
+        logger.warning("generation job %s failed: %s", job.id, job.error_message)
     message = {
         "Pending": "已排队，Floppy 正在准备生成",
         "Generating": "Floppy 正在为你生成音频",
         "Success": "音频已生成",
-        "Failed": job.error_message or "生成失败，请稍后再试",
+        "Failed": "生成失败了，请稍后再试一次",
     }[status]
     return {"id": job.id, "status": status, "message": message, "audio": audio}
 
@@ -1086,12 +1222,19 @@ def mobile_report_history(user_id: str, payload: MobileHistoryIn):
     asset = state.repository.get_asset(payload.audioId)
     if asset is None:
         raise HTTPException(status_code=404, detail="audio not found")
-    record_id = state.repository.record_playback_start(
-        user_id, asset.id, asset.title, _PLAYBACK_SOURCE_MAP.get(payload.source, "recommend")
+    progress = min(1.0, max(0.0, payload.playbackProgress or 0.0))
+    # One listening session = one history row: if this asset already has a
+    # recent row (last 6h), update its progress instead of inserting a dup.
+    record_id = state.repository.touch_recent_playback(
+        user_id, asset.id, progress=progress if payload.playbackProgress else None
     )
-    if payload.playbackProgress:
-        state.repository.update_playback_feedback(record_id, progress=min(1.0, max(0.0, payload.playbackProgress)))
-    return _audio_item(asset, progress=payload.playbackProgress)
+    if record_id is None:
+        record_id = state.repository.record_playback_start(
+            user_id, asset.id, asset.title, _PLAYBACK_SOURCE_MAP.get(payload.source, "recommend")
+        )
+        if payload.playbackProgress:
+            state.repository.update_playback_feedback(record_id, progress=progress)
+    return _audio_item(asset, progress=progress)
 
 
 @app.post("/v1/settings")
@@ -1112,12 +1255,15 @@ async def mobile_upload(user_id: str, file: UploadFile = File(...)):
     suffix = Path(filename).suffix.lower() or ".mp3"
     object_key = f"uploads/{user_id}/{uuid.uuid4().hex[:12]}{suffix}"
     path = state.storage.path_for(object_key)
-    path.write_bytes(data)
+    # Off the event loop — whole-file writes and the ffprobe subprocess would
+    # freeze concurrent realtime voice sessions.
+    await asyncio.to_thread(path.write_bytes, data)
 
     duration_sec = 0
     try:
         from floppy_backend.services.minimax_hubless import probe_audio
-        duration_sec = int(probe_audio(path).duration_sec)
+        meta = await asyncio.to_thread(probe_audio, path)
+        duration_sec = int(meta.duration_sec)
     except Exception:  # noqa: BLE001 — duration is cosmetic
         pass
 
@@ -1181,7 +1327,15 @@ def _reply_audio_url(reply: str) -> str | None:
     try:
         path = state.storage.path_for(object_key)
         if not path.exists():
-            provider.generate_text_to_file(text, path, object_key, voice_style="warm_female", title="floppy_reply")
+            # Hard 5s wall-clock budget: a hung MiniMax call must never stall a
+            # chat turn. The abandoned worker (capped by its own 8s socket
+            # timeout) may still finish and warm the cache for next time.
+            future = _reply_tts_executor.submit(
+                provider.generate_text_to_file,
+                text, path, object_key,
+                voice_style="warm_female", title="floppy_reply", timeout=8,
+            )
+            future.result(timeout=5)
         return state.storage.public_url(object_key)
     except Exception:  # noqa: BLE001 — voice reply is an enhancement, never a blocker
         return None
@@ -1222,25 +1376,46 @@ async def voice_realtime_ws(websocket: WebSocket):
     async def _emit(obj: dict) -> None:
         await websocket.send_text(json.dumps(obj, ensure_ascii=False))
 
+    async def _safe_emit(obj: dict) -> None:
+        try:
+            await _emit(obj)
+        except Exception:  # noqa: BLE001 — client may already be gone
+            pass
+
     try:
         # 握手序列: StartConnection → ConnectionStarted → StartSession → SessionStarted
+        # 每次 recv 都有超时 —— 豆包无响应时不能让 App 永远挂着等。
         await upstream.send(vr.start_connection_frame())
-        evt = vr.parse_server_frame(await upstream.recv())
+        evt = vr.parse_server_frame(await asyncio.wait_for(upstream.recv(), 10))
         if evt.event != vr.EV_CONNECTION_STARTED:
             raise RuntimeError(f"unexpected connect event {evt.event}: {evt.json()}")
         await upstream.send(vr.start_session_frame(session_id, vr.session_config(settings)))
-        evt = vr.parse_server_frame(await upstream.recv())
+        evt = vr.parse_server_frame(await asyncio.wait_for(upstream.recv(), 10))
         if evt.event != vr.EV_SESSION_STARTED:
             raise RuntimeError(f"session start failed {evt.event}: {evt.json()}")
         await _emit({"type": "ready", "dialogId": evt.json().get("dialog_id", "")})
-    except Exception as exc:  # noqa: BLE001
-        await _emit({"type": "error", "message": f"会话建立失败: {exc}"})
+    except asyncio.TimeoutError:
+        await _safe_emit({"type": "error", "message": "通话接通失败，请稍后再试"})
         await upstream.close()
-        await websocket.close(code=1011)
+        try:
+            await websocket.close(code=1011)
+        except Exception:  # noqa: BLE001
+            pass
+        return
+    except Exception as exc:  # noqa: BLE001
+        await _safe_emit({"type": "error", "message": f"会话建立失败: {exc}"})
+        await upstream.close()
+        try:
+            await websocket.close(code=1011)
+        except Exception:  # noqa: BLE001
+            pass
         return
 
     async def _pump_upstream() -> None:
-        """豆包事件 → App 简单协议"""
+        """豆包事件 → App 简单协议。关闭前必发一条 JSON（session_end 或 error），
+        App 永远不会看到"裸的"socket 死亡。"""
+        finished_normally = False
+        error_sent = False
         try:
             async for raw in upstream:
                 evt = vr.parse_server_frame(raw)
@@ -1257,12 +1432,20 @@ async def voice_realtime_ws(websocket: WebSocket):
                 elif evt.event == vr.EV_TTS_ENDED:
                     await _emit({"type": "tts_end"})
                 elif evt.event in (vr.EV_SESSION_FINISHED,):
+                    finished_normally = True
                     break
                 elif evt.event in (vr.EV_SESSION_FAILED, vr.EV_DIALOG_ERROR, vr.EV_CONNECTION_FAILED):
-                    await _emit({"type": "error", "message": str(evt.json())})
+                    await _safe_emit({"type": "error", "message": str(evt.json())})
+                    error_sent = True
                     break
-        except Exception:  # noqa: BLE001 — upstream closed
-            pass
+            else:
+                # 上游正常关闭连接（迭代器自然结束）
+                finished_normally = True
+        except Exception:  # noqa: BLE001 — upstream broke abnormally
+            await _safe_emit({"type": "error", "message": "通话断开了，请稍后再试"})
+            error_sent = True
+        if finished_normally and not error_sent:
+            await _safe_emit({"type": "session_end"})
         try:
             await websocket.close()
         except Exception:  # noqa: BLE001
@@ -1275,7 +1458,10 @@ async def voice_realtime_ws(websocket: WebSocket):
             if message.get("type") == "websocket.disconnect":
                 break
             if (data := message.get("bytes")) is not None:
-                await upstream.send(vr.audio_frame(session_id, data))
+                try:
+                    await upstream.send(vr.audio_frame(session_id, data))
+                except Exception:  # noqa: BLE001 — upstream already closed
+                    break
             elif (text := message.get("text")) is not None:
                 try:
                     ctrl = json.loads(text)
@@ -1285,7 +1471,10 @@ async def voice_realtime_ws(websocket: WebSocket):
                     break
                 if ctrl.get("type") == "text_query" and ctrl.get("text"):
                     # 文本旁路（调试/无麦克风环境用）
-                    await upstream.send(vr.chat_text_query_frame(session_id, str(ctrl["text"])))
+                    try:
+                        await upstream.send(vr.chat_text_query_frame(session_id, str(ctrl["text"])))
+                    except Exception:  # noqa: BLE001 — upstream already closed
+                        break
     except WebSocketDisconnect:
         pass
     finally:
@@ -1295,7 +1484,14 @@ async def voice_realtime_ws(websocket: WebSocket):
         except Exception:  # noqa: BLE001
             pass
         await upstream.close()
-        pump_task.cancel()
+        # Let the pump drain and send its closing JSON (session_end/error)
+        # before force-cancelling it.
+        try:
+            await asyncio.wait_for(pump_task, timeout=3)
+        except (asyncio.TimeoutError, asyncio.CancelledError):
+            pump_task.cancel()
+        except Exception:  # noqa: BLE001
+            pass
         try:
             await websocket.close()
         except Exception:  # noqa: BLE001
