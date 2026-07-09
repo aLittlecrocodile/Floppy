@@ -54,9 +54,11 @@ Chat 发文字（`source="chat"`）和 Home 语音识别完成后（`source="voi
 
 | 字段 | 说明 |
 |---|---|
-| `action` | `play_asset`（audio 可直接播）/ `chat`（纯聊天轮，只显示 reply）/ `no_match`（只显示 reply 文案） |
+| `action` | `play_asset`（audio 可直接播）/ `generate_job`（**异步生成已开始**，见下两行）/ `chat`（纯聊天轮，只显示 reply）/ `no_match`（只显示 reply 文案） |
 | `reply` | 给用户看的一句话回复，Chat 气泡直接用。**智能体现在支持多轮闲聊**（倾诉/提问会得到共情回复而不是硬塞音频），聊天中表达想听时才触发播放——前端无需改动，continue 展示 reply、audio 非空才播即可 |
 | `replyAudioUrl` | **Floppy 语音回复**（MiniMax 温柔女声念出 reply），string \| null。建议前端：非空则先播这段（几秒），`audio` 非空再接主音频。不播也不影响任何功能 |
+| `job_id` | 仅 `action=generate_job` 时返回。**生成不再同步等待**：接口秒回承诺回复，前端每 3s 轮询 `GET /v1/generation-tasks/{job_id}`（建议上限 5 分钟），`status=Success` 时响应带完整 `audio` + `notify_audio_url` |
+| `notify_audio_url` | 兜底播报语音 mp3（固定文案「刚刚你想听的音频生成完成了，现在来听听吧」），string \| null。生成完成后建议：等当前对话轮次结束（不在录音/不在等回复）→ 播这段 → 自动播放 `audio` |
 | `audio.streamUrl` | 可直接作为播放器 source |
 | `audio.coverUrl` | 当前恒为 `null`，前端用本地占位图 |
 | `audio.category` | `White Noise` `Music` `ASMR` `Story` `Meditation` `Podcast` |
@@ -77,13 +79,15 @@ Chat 发文字（`source="chat"`）和 Home 语音识别完成后（`source="voi
    ```
    ⚠️ 上行格式固定 **16kHz / 单声道 / 16bit PCM**（ASR 供应商硬性要求），start 里传别的值不会生效。
 2. 之后连续发送 **binary 帧**（建议每帧 100ms = 3200 字节）。
-3. 说完发 `{ "type": "stop" }`。
+3. 说完发 `{ "type": "stop" }`（兜底路径，见下）。
 4. 服务端下行（均为 JSON 文本帧）：
    ```json
    { "type": "partial", "text": "我今晚想听" }        // 累积式中间结果，会多次推送
-   { "type": "final",   "text": "我今晚想听一点放松的内容" }  // stop 后推送一次，随后连接关闭
+   { "type": "final",   "text": "我今晚想听一点放松的内容" }  // 见触发时机，推送一次后连接关闭
    { "type": "error",   "message": "xxx" }
    ```
+
+**final 触发时机（服务端 VAD）**：转写文本 **1.2 秒**无变化即判定用户说完，服务端**主动**推 `final` 并关连接——正常情况下无需客户端发 stop。注意：用户从未开口（无任何转写文本）时不会推 VAD final，请保留客户端静音兜底（当前 3s，与 1.2s 距离充分，无需调整）。`{"type":"stop"}` 仍然全量支持：收到后立即结束识别并回一条 `final`（只会推一次，VAD 已推过则 stop 不重复推）。
 
 `partial.text` 是**累积全文**（不是增量），直接整体替换显示即可。拿到 `final.text` 后再调 `/voice/intent`（`source="voice"`）。
 
@@ -134,9 +138,11 @@ Chat 发文字（`source="chat"`）和 Home 语音识别完成后（`source="voi
 协议（后端已把豆包二进制协议全部封装掉）：
 - **上行**：binary = 麦克风 PCM 16k/mono/s16le（20ms/包）；`{"type":"stop"}` 挂断
 - **下行**：binary = Floppy 回复语音 PCM **24k**/mono/s16le（AudioTrack 直接播）
-  JSON：`{"type":"ready"}`（接通，开始推麦克风）/ `{"type":"asr","text","interim"}`（你的话）/ `{"type":"chat","text"}`（Floppy 字幕）/ `{"type":"asr_info"}`（**用户开口信号，客户端立刻停播实现打断**）/ `{"type":"tts_end"}` / `{"type":"error","message"}`
+  JSON：`{"type":"ready"}`（接通，开始推麦克风）/ `{"type":"asr","text","interim"}`（你的话）/ `{"type":"chat","text"}`（Floppy 字幕）/ `{"type":"asr_info"}`（**用户开口信号，客户端立刻停播实现打断**）/ `{"type":"tts_end"}`（Floppy 这轮说完 = 轮次边界）/ `{"type":"session_end"}`（会话正常结束）/ `{"type":"error","message"}`
 
-注意：通话是独立于 Chat 意图链路的陪聊模式；通话中想播助眠音频仍走 `/voice/intent`。
+**通话中点播/生成（新）**：后端代理会从用户的话里识别「想听 XX」并自动派单，前端无需发任何请求：
+- `{"type":"generation_started","jobId"}` — 已开始后台生成（豆包会口头承诺「我去准备，好了叫你」，继续陪聊）
+- `{"type":"generation_done","jobId","audio":{AudioItem},"notifyAudioUrl"}` — 做好了（缓存命中则秒到，此时 `jobId` 为 null）。客户端建议流程：等下一个 `tts_end` 轮次边界 → **温柔自动挂断** → 播 `notifyAudioUrl` → 自动播放 `audio`。若用户提前挂断且只收到过 `generation_started`，拿 `jobId` 轮询 `GET /v1/generation-tasks/{jobId}` 兜底
 
 ## 推荐接入流程
 

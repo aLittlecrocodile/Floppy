@@ -377,6 +377,7 @@ class MiniMaxTTSProvider(AudioGenerationProvider):
         voice_style: str | None = None,
         voice_id: str | None = None,
         title: str | None = None,
+        timeout: float | None = None,
     ) -> GeneratedAudio:
         if len(text) > self.settings.minimax_sync_max_chars and voice_id is None:
             normalized = NormalizedAudioRequest(
@@ -391,7 +392,7 @@ class MiniMaxTTSProvider(AudioGenerationProvider):
             return self.generate_async_and_wait(normalized, output_path, object_key, script_text=text, title=title)
 
         payload = self._build_payload(text, voice_style=voice_style, voice_id=voice_id)
-        response = self._post_json("/v1/t2a_v2", payload)
+        response = self._post_json("/v1/t2a_v2", payload, timeout=timeout or 60)
         base_resp = response.get("base_resp") or {}
         if base_resp.get("status_code") not in (0, None):
             self._raise_base_resp_error(base_resp, "MiniMax T2A request failed")

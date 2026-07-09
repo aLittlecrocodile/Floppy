@@ -53,8 +53,11 @@ class Settings(BaseSettings):
     hermes_model: str = "hermes-agent"
     hermes_timeout_sec: float = 30.0
     hermes_store_conversation: bool = True
-    # Max catalog assets shown to Hermes per decision (newest first).
-    hermes_catalog_limit: int = 60
+    # Max catalog assets shown to Hermes per decision (curated first, newest
+    # first). Must comfortably exceed the curated pool size (currently 64) —
+    # a tighter cap silently hides the oldest curated assets from the agent
+    # and it "generates" content the library already has.
+    hermes_catalog_limit: int = 120
 
     # Directive planner + LLM script writer (agent "thinks first" before
     # commanding the generation workflow). Reuses query_planner_* creds unless
@@ -102,6 +105,10 @@ class Settings(BaseSettings):
     )
     # /voice/ws shared-secret (PoC auth; replace with platform auth in prod)
     voice_ws_token: str | None = None
+
+    # --- Logging ---
+    log_level: str = "INFO"          # DEBUG | INFO | WARNING | ERROR
+    log_dir: str = "logs"            # rotating file lives here (logs/floppy.log)
 
     model_config = SettingsConfigDict(env_prefix="FLOPPY_", env_file=".env")
 

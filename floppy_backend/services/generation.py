@@ -1,9 +1,21 @@
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 
 from floppy_backend.config import Settings
-from floppy_backend.models import AudioAsset, AudioScript, EventIn, GenerationJobCreateResponse, GenerationRequest, GenerationResponse, NormalizedAudioRequest
+from floppy_backend.models import (
+    AudioAsset,
+    AudioScript,
+    EventIn,
+    GenerationBudget,
+    GenerationJob,
+    GenerationJobCreateResponse,
+    GenerationRequest,
+    GenerationResponse,
+    NormalizedAudioRequest,
+    ProfileContext,
+)
 from floppy_backend.providers.audio import AudioGenerationProvider, GeneratedAudio
 from floppy_backend.repositories import Repository
 from floppy_backend.services.normalizer import RequestNormalizer
@@ -36,6 +48,7 @@ class GenerationService:
         normalizer: RequestNormalizer,
         script_service: SleepScriptService,
         settings: Settings | None = None,
+        directive_planner=None,
     ):
         self.repository = repository
         self.storage = storage
@@ -43,6 +56,12 @@ class GenerationService:
         self.normalizer = normalizer
         self.script_service = script_service
         self._settings = settings
+        # 异步路径下 worker 自己补指令规划（enqueue 阶段不再同步跑 LLM）
+        self._directive_planner = directive_planner
+        # In-memory handoff of PreparedGeneration from enqueue_or_match to the
+        # inline run_job call in the same process — avoids regenerating the
+        # script LLM output (5-20s + double LLM cost) at run time.
+        self._prepared_by_job: dict[str, PreparedGeneration] = {}
         self.workflow_service = SleepAudioWorkflowService(
             repository=repository,
             storage=storage,
@@ -114,7 +133,9 @@ class GenerationService:
         )
 
     def enqueue_or_match(self, user_id: str, request: GenerationRequest) -> GenerationJobCreateResponse:
-        prepared = self.prepare(user_id, request)
+        # 轻量入队：只做归一化 + 缓存匹配（毫秒级）。脚本 LLM（10-20s）留给
+        # 后台 run_job —— 前台对话必须秒回（前后台双流程）。
+        prepared = self.prepare(user_id, request, prepare_script=False)
         if prepared.cached_asset:
             job_id = self.repository.create_generation_job(
                 user_id=user_id,
@@ -145,6 +166,10 @@ class GenerationService:
             provider=self.provider.name,
             directive_json=request.directive.model_dump_json() if request.directive else None,
         )
+        if claimed and prepared.script is not None:
+            # Hand the already-generated script to run_job (same process) so the
+            # script LLM doesn't run twice per generation.
+            self._prepared_by_job[job.id] = prepared
         return GenerationJobCreateResponse(
             job_id=job.id,
             status=job.status,
@@ -154,26 +179,78 @@ class GenerationService:
             normalized_request=prepared.normalized,
         )
 
-    def run_job(self, job_id: str, user_id: str, request: GenerationRequest) -> None:
+    def run_job(
+        self,
+        job_id: str,
+        user_id: str,
+        request: GenerationRequest,
+        prepared: PreparedGeneration | None = None,
+    ) -> GenerationJob | None:
         job = self.repository.get_generation_job(job_id)
         if job is None:
-            return
+            return None
         if job.status == "succeeded":
-            return
+            return job
+        # Atomic claim: only one worker may run the pipeline for a job. A job
+        # already 'generating' (client timeout+retry, double-tap) is NOT re-run
+        # — we wait for the in-flight worker instead of double-spending TTS and
+        # corrupting the shared output file.
+        if not self.repository.claim_job_for_run(job_id):
+            for _ in range(60):
+                time.sleep(1)
+                job = self.repository.get_generation_job(job_id)
+                if job is None or job.status != "generating":
+                    break
+            return job
         # Recover the agent's directive from the persisted job when the caller
         # didn't carry it (async path reconstructs a bare GenerationRequest).
         # Without this the worker would regenerate from a template even though
         # the agent already wrote a content outline at enqueue time.
         if request.directive is None and job.directive is not None:
             request = request.model_copy(update={"directive": job.directive})
-        self.repository.update_generation_job(job_id, status="generating")
-        prepared = self.prepare(user_id, request, allow_cache=False)
+        # 异步路径：指令规划挪到了 worker（enqueue 不再同步跑 LLM）。
+        # 规划失败不阻塞 —— 脚本服务会用归一化结果兜底。
+        if request.directive is None and self._directive_planner is not None:
+            try:
+                request = request.model_copy(update={
+                    "directive": self._directive_planner.plan(request.request_text, self._planning_context(user_id))
+                })
+            except Exception:  # noqa: BLE001 — directive is best-effort
+                pass
+        if prepared is None:
+            prepared = self._prepared_by_job.pop(job_id, None)
+        if prepared is None:
+            try:
+                prepared = self.prepare(user_id, request, allow_cache=False)
+            except Exception as exc:  # noqa: BLE001 — never leave the job stuck 'generating'
+                self._mark_failed(job_id, exc, None)
+                return self.repository.get_generation_job(job_id)
         try:
             asset, latency_ms, generated = self.execute_generation(user_id, prepared)
         except Exception as exc:  # pragma: no cover - defensive boundary for provider failures.
             self._mark_failed(job_id, exc, prepared.script)
-            return
+            return self.repository.get_generation_job(job_id)
         self._mark_succeeded(job_id, asset, latency_ms, prepared.script, generated)
+        return self.repository.get_generation_job(job_id)
+
+    def _planning_context(self, user_id: str) -> ProfileContext | None:
+        """给指令规划器的画像上下文（对齐 hermes_agent._profile_context 的形状）。"""
+        try:
+            profile = self.repository.get_profile(user_id)
+            if profile is None:
+                return None
+            used_chars, used_count = self.repository.generation_usage_since(user_id)
+            char_budget = self._settings.daily_char_budget if self._settings else 0
+            count_budget = self._settings.daily_generate_count if self._settings else 0
+            return ProfileContext(
+                **profile.model_dump(),
+                generation_budget=GenerationBudget(
+                    daily_remaining_chars=max(0, char_budget - used_chars),
+                    daily_generate_count_remaining=max(0, count_budget - used_count),
+                ),
+            )
+        except Exception:  # noqa: BLE001 — 上下文缺失时规划器照样能工作
+            return None
 
     def cache_key_for(self, normalized: NormalizedAudioRequest, directive=None, request_text: str | None = None) -> str:
         return build_sleep_audio_cache_key(
@@ -181,7 +258,9 @@ class GenerationService:
             request_text=request_text,
         )
 
-    def prepare(self, user_id: str, request: GenerationRequest, allow_cache: bool = True) -> PreparedGeneration:
+    def prepare(
+        self, user_id: str, request: GenerationRequest, allow_cache: bool = True, prepare_script: bool = True
+    ) -> PreparedGeneration:
         profile = self.repository.get_profile(user_id)
         normalized = self.normalizer.normalize(request, profile)
         directive = request.directive
@@ -209,6 +288,11 @@ class GenerationService:
         # key must stay stable or repeat requests regenerate paid TTS.
         if directive is not None and directive.intent is not None:
             normalized = normalized.model_copy(update={"intent": directive.intent})
+
+        if not prepare_script:
+            return PreparedGeneration(
+                normalized=normalized, cache_key=cache_key, cached_asset=None, match_type="generated", script=None, directive=directive
+            )
 
         script = self.workflow_service.prepare_script(
             user_id=user_id, normalized=normalized, profile=profile, directive=directive

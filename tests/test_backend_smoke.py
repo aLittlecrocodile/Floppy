@@ -49,7 +49,8 @@ def test_generation_job_smoke(tmp_path, monkeypatch):
         assert job.status_code == 200
         job_body = job.json()
         assert job_body["status"] == "succeeded"
-        assert job_body["asset"]["playback_url"].startswith("http://127.0.0.1:8000/audio/")
+        # Playback URLs are minted from the request's own host (stale-IP fix).
+        assert job_body["asset"]["playback_url"].startswith("http://testserver/audio/")
         assert job_body["script"]["script_text"]
 
 
@@ -76,7 +77,7 @@ def test_agent_decide_response_contract_smoke(tmp_path, monkeypatch):
         assert "search" in body
 
         if body["asset"]:
-            assert body["asset"]["playback_url"].startswith("http://127.0.0.1:8000/audio/")
+            assert body["asset"]["playback_url"].startswith("http://testserver/audio/")
         if body["job_id"]:
             job = client.get(f"/generation-jobs/{body['job_id']}")
             assert job.status_code == 200

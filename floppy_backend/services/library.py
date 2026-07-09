@@ -37,11 +37,21 @@ class LibraryService:
 
     # -- pools ---------------------------------------------------------------
 
+    def _has_local_file(self, asset: AudioAsset) -> bool:
+        """Cheap guard against stale DB rows: never surface an asset whose
+        audio file is gone from local storage."""
+        try:
+            return self._storage.existing_path_for(asset.object_key).exists()
+        except (ValueError, OSError):
+            return False
+
     def _curated_pool(self) -> list[AudioAsset]:
         assets = [
             asset
             for asset in self._repo.list_assets(tier=TIER_CURATED)
-            if not is_placeholder_created_by(asset.created_by) and "upload" not in asset.tags
+            if not is_placeholder_created_by(asset.created_by)
+            and "upload" not in asset.tags
+            and self._has_local_file(asset)
         ]
         for asset in assets:
             asset.playback_url = self._storage.public_url(asset.object_key)
@@ -53,7 +63,7 @@ class LibraryService:
         assets = [
             asset
             for asset in self._repo.list_assets()
-            if not is_placeholder_created_by(asset.created_by)
+            if not is_placeholder_created_by(asset.created_by) and self._has_local_file(asset)
         ]
         assets.sort(key=lambda asset: (asset.tier != TIER_CURATED, -asset.created_at.timestamp()))
         assets = assets[: self._settings.hermes_catalog_limit]

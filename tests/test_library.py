@@ -14,6 +14,15 @@ def _configure_tmp_app(monkeypatch, tmp_path) -> None:
     get_settings.cache_clear()
 
 
+def _materialize_files() -> None:
+    """Library pools now skip assets whose audio file is missing on disk —
+    give every test asset a real (dummy) file."""
+    for asset in state.repository.list_assets():
+        path = state.storage.path_for(asset.object_key)
+        if not path.exists():
+            path.write_bytes(b"\x00")
+
+
 def _asset(title: str, *, type_: AudioType, tier: str, quality: float = 0.8, tags: list[str] | None = None) -> AudioAssetIn:
     return AudioAssetIn(
         type=type_,
@@ -41,6 +50,7 @@ def test_home_recommended_excludes_community_and_interleaves_types(tmp_path, mon
         repo.upsert_asset(_asset("精品白噪音B", type_=AudioType.WHITE_NOISE, tier="curated", quality=0.85))
         repo.upsert_asset(_asset("精品冥想", type_=AudioType.MEDITATION, tier="curated", quality=0.8))
         repo.upsert_asset(_asset("测试垃圾", type_=AudioType.WHITE_NOISE, tier="community", quality=0.99))
+        _materialize_files()
 
         recommended = state.library.home_recommended("u_lib", limit=10)
         titles = [asset.title for asset in recommended]
@@ -56,6 +66,7 @@ def test_agent_candidates_curated_first(tmp_path, monkeypatch):
         repo = state.repository
         repo.upsert_asset(_asset("社区新品", type_=AudioType.STORY, tier="community"))
         repo.upsert_asset(_asset("精品老品", type_=AudioType.STORY, tier="curated"))
+        _materialize_files()
         candidates = state.library.agent_candidates()
         assert candidates[0].title == "精品老品"
         assert candidates[0].playback_url
@@ -67,6 +78,7 @@ def test_tonight_pick_rotates(tmp_path, monkeypatch):
         repo = state.repository
         repo.upsert_asset(_asset("轮换A", type_=AudioType.MUSIC, tier="curated", quality=0.9))
         repo.upsert_asset(_asset("轮换B", type_=AudioType.MUSIC, tier="curated", quality=0.9))
+        _materialize_files()
 
         first = state.library.tonight_pick(user_id="u_rot", preferred_types=["music"])
         second = state.library.tonight_pick(user_id="u_rot", preferred_types=["music"])

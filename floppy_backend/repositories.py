@@ -394,6 +394,23 @@ class Repository:
             created = self.conn.execute("SELECT * FROM generation_jobs WHERE id = ?", (job_id,)).fetchone()
             return self._job_from_row(created), True
 
+    def claim_job_for_run(self, job_id: str) -> bool:
+        """Atomically claim a job for execution. Returns False when the job is
+        already generating (someone else runs it) or already succeeded —
+        callers must NOT run the pipeline in that case. 'queued' and 'failed'
+        jobs claim successfully (prewarm / retry-of-failed keep working)."""
+        with self._lock:
+            cursor = self.conn.execute(
+                """
+                UPDATE generation_jobs
+                SET status = 'generating', updated_at = ?
+                WHERE id = ? AND status NOT IN ('generating', 'succeeded')
+                """,
+                (utcnow().isoformat(), job_id),
+            )
+            self.conn.commit()
+            return cursor.rowcount == 1
+
     def update_generation_job(
         self,
         job_id: str,
@@ -643,6 +660,30 @@ class Repository:
             )
             self.conn.commit()
         return record_id
+
+    def touch_recent_playback(self, user_id: str, asset_id: str, *, progress: float | None = None, within_hours: int = 6) -> str | None:
+        """If the newest history row for (user_id, asset_id) is recent (same
+        listening session), update its progress and return its id; else None
+        (caller inserts a fresh row). Keeps repeated progress reports from
+        flooding the history list with duplicates."""
+        since = (utcnow() - timedelta(hours=within_hours)).isoformat()
+        with self._lock:
+            row = self.conn.execute(
+                """
+                SELECT id FROM playback_history
+                WHERE user_id = ? AND asset_id = ? AND started_at >= ?
+                ORDER BY started_at DESC LIMIT 1
+                """,
+                (user_id, asset_id, since),
+            ).fetchone()
+            if row is None:
+                return None
+            self.conn.execute(
+                "UPDATE playback_history SET progress = COALESCE(?, progress) WHERE id = ?",
+                (progress, row["id"]),
+            )
+            self.conn.commit()
+        return row["id"]
 
     def update_playback_feedback(self, record_id: str, *, feedback_type: str | None = None, rating: int | None = None, progress: float | None = None, morning_feedback: str | None = None, completed: bool = False) -> None:
         now = utcnow()
