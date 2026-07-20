@@ -12,7 +12,7 @@ import time
 import urllib.parse
 
 from fastapi import BackgroundTasks, Depends, FastAPI, File, Form, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from pydantic import BaseModel, Field
 
 from floppy_backend.config import Settings, get_settings
@@ -380,6 +380,18 @@ async def voice_ws(websocket: WebSocket):
                 utterance_task.cancel()
 
 
+@app.get("/", include_in_schema=False)
+def root_redirect():
+    return RedirectResponse(url="/showcase")
+
+
+@app.get("/showcase", response_class=HTMLResponse)
+def showcase_page():
+    from floppy_backend.showcase_page import SHOWCASE_HTML
+    from floppy_backend.showcase_script import SHOWCASE_SCRIPT
+    return SHOWCASE_HTML.replace("__SCRIPT__", SHOWCASE_SCRIPT)
+
+
 @app.get("/demo", response_class=HTMLResponse)
 def demo_page():
     return DEMO_HTML
@@ -547,8 +559,7 @@ def record_event(user_id: str, event: EventIn, repository: Repository = Depends(
     return {"event_id": event_id}
 
 
-@app.post("/agent/decide", response_model=AgentDecideResponse)
-def agent_decide(req: AgentDecideRequest, background_tasks: BackgroundTasks):
+def _run_agent_decide(req: AgentDecideRequest, background_tasks: BackgroundTasks) -> AgentDecideResponse:
     try:
         response = state.agent_runtime.run(req)
     except BudgetExceededError as exc:
@@ -573,6 +584,30 @@ def agent_decide(req: AgentDecideRequest, background_tasks: BackgroundTasks):
                 GenerationRequest(request_text=req.request_text, force_generate=True),
             )
     return response
+
+
+@app.post("/agent/decide", response_model=AgentDecideResponse)
+def agent_decide(req: AgentDecideRequest, background_tasks: BackgroundTasks):
+    return _run_agent_decide(req, background_tasks)
+
+
+SHOWCASE_USER_ID = "showcase_user"
+
+
+@app.post("/showcase/chat", response_model=AgentDecideResponse)
+def showcase_chat(payload: dict, background_tasks: BackgroundTasks):
+    request_text = str(payload.get("request_text", "")).strip()
+    if len(request_text) < 2:
+        raise HTTPException(status_code=400, detail="request_text is required")
+    current_asset_id = payload.get("current_asset_id") or None
+    _ensure_demo_profile(SHOWCASE_USER_ID)
+    req = AgentDecideRequest(
+        user_id=SHOWCASE_USER_ID,
+        request_text=request_text,
+        generation_allowed=True,
+        current_asset_id=current_asset_id,
+    )
+    return _run_agent_decide(req, background_tasks)
 
 
 _AUDIO_MIME_BY_SUFFIX = {
