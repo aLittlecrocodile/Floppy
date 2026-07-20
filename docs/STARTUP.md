@@ -1,7 +1,7 @@
 # Unwind 后端启动指南
 
 > 给接手的 agent / 同事：如何在本机或服务器启动 Unwind 后端并完成前端联调。
-> 当前仓库包含 Unwind 后端、体验页和音频生成链路；历史调研文档统一放在 `docs/research/`。
+> 当前仓库包含 Unwind 后端、体验页和音频生成链路；当前对接文档从 `docs/README.md` 开始。
 
 ## 0. 这是什么
 
@@ -112,5 +112,5 @@ curl -s -X POST http://127.0.0.1:8000/agent/decide \
 
 ## 7. 注意
 
-- `tests/test_mvp_flow.py` 已移到 `tests/legacy/`（旧测试假设资产库会未命中，与现真实资产集冲突，不再跑）。当前有效测试：`tests/test_script_guard.py`、`tests/test_voice_session.py`、`tests/test_workflow_contracts.py`。
+- 当前测试覆盖脚本安全、语音会话、workflow 契约、showcase 页面和后端 smoke 场景；运行 `pytest` 可执行完整测试集。
 - 安全/鉴权当前是 PoC 级（无 HTTP 鉴权、WS 用 shared-secret）；上线前需替换为正式登录鉴权。

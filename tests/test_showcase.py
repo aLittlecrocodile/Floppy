@@ -53,3 +53,50 @@ def test_showcase_chat_rejects_blank_text(tmp_path, monkeypatch):
     _configure_tmp_app(monkeypatch, tmp_path)
     with TestClient(app) as client:
         assert client.post("/showcase/chat", json={"request_text": " "}).status_code == 400
+
+
+def test_showcase_skill_matrix(tmp_path, monkeypatch):
+    _configure_tmp_app(monkeypatch, tmp_path)
+    with TestClient(app) as client:
+        resp = client.get("/showcase/skills")
+        assert resp.status_code == 200
+        skills = resp.json()["skills"]
+        assert len(skills) >= 15
+        assert {s["category"] for s in skills} == {"onetool", "ritual", "sound"}
+        assert all(s["status"] in {"live", "demo", "planned"} for s in skills)
+
+
+def test_showcase_weekly_ghostwriter_demo_route(tmp_path, monkeypatch):
+    """OneTool demo flows short-circuit before Hermes — no Hermes needed."""
+    _configure_tmp_app(monkeypatch, tmp_path)
+    with TestClient(app) as client:
+        resp = client.post("/showcase/chat", json={"request_text": "周报还没写，帮我搞定"})
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["action"] == "chat"
+        assert data["selected_skill"] == "weekly_ghostwriter"
+        assert data["skill_card"]["type"] == "weekly_draft"
+        assert data["skill_card"]["rows"]
+        assert data["planner_meta"]["planner_source"] == "skill_demo"
+        assert any(c["name"].startswith("weekly_ghostwriter") for c in data["tool_calls"])
+
+
+def test_showcase_okr_and_neisou_demo_routes(tmp_path, monkeypatch):
+    _configure_tmp_app(monkeypatch, tmp_path)
+    with TestClient(app) as client:
+        okr = client.post("/showcase/chat", json={"request_text": "这季度 OKR 感觉要完不成了"}).json()
+        assert okr["skill_card"]["type"] == "okr_progress"
+        assert okr["skill_card"]["krs"]
+        ns = client.post("/showcase/chat", json={"request_text": "差旅报销流程怎么走？"}).json()
+        assert ns["skill_card"]["type"] == "neisou_answer"
+        assert ns["skill_card"]["owner"]
+
+
+def test_showcase_nudge_scenarios(tmp_path, monkeypatch):
+    _configure_tmp_app(monkeypatch, tmp_path)
+    with TestClient(app) as client:
+        for scenario in ("post_meeting", "weekly_due"):
+            resp = client.get(f"/showcase/nudge?scenario={scenario}")
+            assert resp.status_code == 200
+            assert resp.json()["title"]
+        assert client.get("/showcase/nudge?scenario=nope").status_code == 404

@@ -1,6 +1,6 @@
 # Unwind 文档索引
 
-这里是 Unwind 后端、体验页和音频生成链路的文档入口。当前实现优先看“启动与体验”“接口对接”和“运行契约”；`research/` 与 `logs/` 只用于查历史决策。
+这里是 Unwind 后端、体验页和音频生成链路的文档入口。当前实现优先看“启动与体验”“接口对接”和“运行契约”；开发记录仅用于查历史决策。
 
 ## 启动与体验
 
@@ -55,10 +55,7 @@
 - [architecture/floppy_backend_architecture.png](architecture/floppy_backend_architecture.png)
   后端架构图图片。
 
-## 历史归档
+## 开发记录
 
-以下内容保留用于追溯，不作为当前实现入口：
-
-- [logs/development_log.md](logs/development_log.md)  项目过程记录。
-- [research/](research/)  早期算法、供应商和 workflow 调研。
-- [contracts/algo_p0_design_v1.md](contracts/algo_p0_design_v1.md)  早期算法设计稿。
+- [logs/development_log.md](logs/development_log.md)  项目过程记录，不作为当前实现入口。
+- [contracts/algo_p0_design_v1.md](contracts/algo_p0_design_v1.md)  早期算法设计稿，仅在需要追溯时查看。

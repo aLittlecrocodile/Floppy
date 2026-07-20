@@ -294,6 +294,9 @@ class AgentDecideResponse(BaseModel):
     planner_meta: PlannerMeta | None = None
     selected_skill: str | None = None
     tool_calls: list[AgentToolCall] = Field(default_factory=list)
+    # Structured payload for frontend skill cards (weekly draft, OKR progress,
+    # neisou answer, ...). None for plain decisions.
+    skill_card: dict[str, Any] | None = None
 
 
 # --- P0: Questionnaire ---

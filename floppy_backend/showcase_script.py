@@ -27,8 +27,20 @@ const SKILL_LABELS = {
   remix_current: '混音当前音频',
   chat: '对话陪伴',
   no_match: '未匹配',
+  // forward-compat: phase 2+ skills (backend rollout pending)
+  reframe_thought: '认知重构引导',
+  mood_checkin: '心情打卡',
+  worry_parking: '烦恼寄存',
+  gratitude_moment: '三件好事',
+  update_preference: '偏好更新',
+  sleep_timer: '定时停播',
+  // OneTool demo skills
+  weekly_ghostwriter: '周报代写',
+  okr_reframe: 'OKR 实据重构',
+  neisou_answer: '内搜兜底',
+  calendar_sense: '下会缓冲舱',
 };
-const INTENT_LABELS = { story: '睡前故事', meditation: '冥想引导', asmr: 'ASMR', white_noise: '白噪音', music: '音乐' };
+const INTENT_LABELS = { story: '放松故事', meditation: '冥想引导', asmr: 'ASMR', white_noise: '白噪音', music: '音乐', podcast_digest: '播客精华' };
 const PROGRESS_COPY = [
   '正在为你写一段专属的脚本…',
   '正在挑选合适的声音…',
@@ -37,6 +49,7 @@ const PROGRESS_COPY = [
 ];
 
 let currentAssetId = null;   // for remix_current context
+let lastUserText = '';       // for comfort-card moment detection
 let pollTimer = null, progressTimer = null;
 
 /* ---------- chat stream ---------- */
@@ -76,7 +89,7 @@ function tlReset() {
 }
 function setNode(id, state) { $(id).className = state === 'running' ? 'active running' : 'active ' + state; }
 const line = (t) => '<div class="line">' + t + '</div>';
-const sourceLabel = (source) => ({ hermes: '智能体', exact_cache: '精确缓存' }[source] || source || '—');
+const sourceLabel = (source) => ({ hermes: '智能体', exact_cache: '精确缓存', skill_demo: '技能路由 · OneTool' }[source] || source || '—');
 
 function renderIntentNode(data) {
   const pm = data.planner_meta || {};
@@ -165,6 +178,7 @@ async function showSuggestions(container) {
 async function sendText(text) {
   text = (text || '').trim();
   if (text.length < 2) return;
+  lastUserText = text;
   promptEl.value = '';
   sendBtn.disabled = true;
   addMsg('user', esc(text));
@@ -193,6 +207,9 @@ function handleDecision(data, bubble) {
   const pm = data.planner_meta || {};
   const degraded = (pm.fallback_reason || '').startsWith('hermes_unavailable');
   bubble.innerHTML = esc(data.reply || defaultReply(data.action));
+
+  pulseSkill((data.skill_card && data.skill_card.skill) || data.selected_skill || data.action);
+  if (data.skill_card) renderSkillCard(data);
 
   const tool = execTool(data);
 
@@ -243,6 +260,12 @@ function handleDecision(data, bubble) {
     showSuggestions(holder);
   } else {
     $('n4body').innerHTML = line('以对话回应');
+    const replyText = data.reply || '';
+    if (replyText && CARD_RE.test(lastUserText)) {
+      renderComfortCard(replyText, bubble);   // farewell/安心签 moment → the reply IS the card
+    } else {
+      attachCardify(bubble, replyText);       // any reply can be turned into a card
+    }
   }
 }
 
@@ -707,4 +730,322 @@ document.addEventListener('keydown', (event) => {
   try { await ensureVoice(); }
   catch { talkBtn.disabled = true; talkBtn.title = '语音服务暂不可用'; }
 })();
+
+/* ================= 减压视觉交互:水波纹 ================= */
+document.addEventListener('pointerdown', (e) => {
+  if (e.target.closest('button, textarea, a, .chip, .msg, .comfort-card, .call-shell, .nowbar, .breathe-stage')) return;
+  for (const cls of ['', 'r2']) {
+    const r = document.createElement('span');
+    r.className = ('ripple ' + cls).trim();
+    r.style.left = e.clientX + 'px'; r.style.top = e.clientY + 'px';
+    document.body.appendChild(r);
+    r.addEventListener('animationend', () => r.remove());
+  }
+});
+
+/* ================= 呼吸练习:4-7-8 × 3 轮 ≈ 60s ================= */
+const breatheOverlay = $('breatheOverlay'), orbEl = $('orb'), orbGlowEl = $('orbGlow');
+const breathePhaseEl = $('breathePhase'), breatheCountEl = $('breatheCount');
+const breatheRoundsEl = $('breatheRounds'), breatheActionsEl = $('breatheActions');
+const BREATH_STEPS = [
+  { label: '吸气', secs: 4, scale: 1 },
+  { label: '屏住', secs: 7, scale: null },   // hold: orb stays
+  { label: '呼气', secs: 8, scale: 0.72 },
+];
+const BREATH_TOTAL_ROUNDS = 3;
+let breatheTimers = [];
+const bt = (fn, ms) => breatheTimers.push(setTimeout(fn, ms));
+function clearBreathe() { breatheTimers.forEach(clearTimeout); breatheTimers = []; }
+function setOrb(scale, secs) {
+  orbEl.style.transitionDuration = secs + 's';
+  orbGlowEl.style.transitionDuration = secs + 's';
+  orbEl.style.transform = 'scale(' + scale + ')';
+  orbGlowEl.style.transform = 'scale(' + scale + ')';
+}
+function runBreatheRound(round) {
+  const dots = breatheRoundsEl.querySelectorAll('i');
+  dots.forEach((d, i) => d.classList.toggle('on', i < round));
+  if (round >= BREATH_TOTAL_ROUNDS) {
+    dots.forEach((d) => d.classList.add('on'));
+    breathePhaseEl.textContent = '很好';
+    breatheCountEl.textContent = '心跳慢下来了吗？带着这口气回去吧';
+    breatheActionsEl.hidden = false;
+    setOrb(0.8, 2);
+    return;
+  }
+  const ticks = [];
+  for (const step of BREATH_STEPS) for (let s = 0; s < step.secs; s++) ticks.push({ step, s });
+  ticks.forEach((t, idx) => bt(() => {
+    if (t.s === 0) {
+      breathePhaseEl.textContent = t.step.label;
+      if (t.step.scale != null) setOrb(t.step.scale, t.step.secs);
+    }
+    breatheCountEl.textContent = String(t.step.secs - t.s);
+  }, idx * 1000));
+  bt(() => runBreatheRound(round + 1), ticks.length * 1000);
+}
+function startBreathe() {
+  clearBreathe();
+  breatheOverlay.hidden = false;
+  document.body.classList.add('call-open');  // reuse scroll lock
+  breathePhaseEl.textContent = '准备';
+  breatheCountEl.textContent = '找个舒服的姿势，跟着圆球呼吸';
+  breatheActionsEl.hidden = true;
+  breatheRoundsEl.querySelectorAll('i').forEach((d) => d.classList.remove('on'));
+  setOrb(0.72, 1);
+  bt(() => runBreatheRound(0), 2400);
+}
+function stopBreathe() {
+  clearBreathe();
+  breatheOverlay.hidden = true;
+  if (callOverlay.hidden) document.body.classList.remove('call-open');
+}
+$('breatheBtn').addEventListener('click', startBreathe);
+$('breatheClose').addEventListener('click', stopBreathe);
+$('breatheAgain').addEventListener('click', startBreathe);
+$('breatheDone').addEventListener('click', stopBreathe);
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && !breatheOverlay.hidden) stopBreathe();
+});
+
+/* ================= 安心签 comfort card ================= */
+const CARD_RE = /晚安|睡了|去睡|去忙|收工|下班|回去干活|再见|拜拜|告辞|安心签/;
+const CN_WEEK = ['日', '一', '二', '三', '四', '五', '六'];
+function cardDate() {
+  const d = new Date();
+  return (d.getMonth() + 1) + ' 月 ' + d.getDate() + ' 日 · 周' + CN_WEEK[d.getDay()];
+}
+function renderComfortCard(text, replaceEl) {
+  const card = document.createElement('div');
+  card.className = 'comfort-card';
+  card.innerHTML =
+    '<div class="cc-kicker"><span>安 心 签</span><span>' + esc(cardDate()) + '</span></div>' +
+    '<div class="cc-text">' + esc(text) + '</div>' +
+    '<div class="cc-foot"><span class="cc-seal">安</span><span class="cc-brand">UNWIND</span>' +
+    '<button class="cc-save" type="button">保存卡片</button></div>';
+  card.querySelector('.cc-save').addEventListener('click', () => saveCardImage(text));
+  if (replaceEl) replaceEl.replaceWith(card); else streamEl.appendChild(card);
+  streamEl.scrollTop = streamEl.scrollHeight;
+  return card;
+}
+function attachCardify(bubble, text) {
+  if (!text || !bubble || bubble.querySelector('.cc-make')) return;
+  const b = document.createElement('button');
+  b.className = 'cc-make'; b.type = 'button'; b.title = '制成安心签'; b.textContent = '签';
+  b.addEventListener('click', () => renderComfortCard(text));
+  bubble.appendChild(b);
+}
+function saveCardImage(text) {
+  const W = 680, H = 920, dpr = 2;
+  const canvas = document.createElement('canvas');
+  canvas.width = W * dpr; canvas.height = H * dpr;
+  const ctx = canvas.getContext('2d');
+  ctx.scale(dpr, dpr);
+  // paper base
+  const bg = ctx.createLinearGradient(0, 0, 0, H);
+  bg.addColorStop(0, '#fffefb'); bg.addColorStop(1, '#f1eee6');
+  ctx.fillStyle = bg; ctx.fillRect(0, 0, W, H);
+  // ink washes
+  const wash = (x, y, r, color) => {
+    const g = ctx.createRadialGradient(x, y, 0, x, y, r);
+    g.addColorStop(0, color); g.addColorStop(1, 'rgba(255,255,255,0)');
+    ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+  };
+  wash(90, 60, 420, 'rgba(185,208,198,.55)');
+  wash(W - 60, H - 80, 460, 'rgba(236,217,200,.6)');
+  wash(W - 120, 140, 260, 'rgba(214,90,71,.10)');
+  // grain
+  for (let i = 0; i < 1200; i++) {
+    ctx.fillStyle = 'rgba(60,52,48,' + (Math.random() * 0.035).toFixed(3) + ')';
+    ctx.fillRect(Math.random() * W, Math.random() * H, 1, 1);
+  }
+  // inner frame
+  ctx.strokeStyle = 'rgba(88,78,72,.3)'; ctx.lineWidth = 1;
+  ctx.strokeRect(28, 28, W - 56, H - 56);
+  ctx.strokeStyle = 'rgba(88,78,72,.14)';
+  ctx.strokeRect(38, 38, W - 76, H - 76);
+  const serif = '"Songti SC", "Noto Serif SC", Georgia, serif';
+  // kicker + date
+  ctx.fillStyle = '#8a8f8c'; ctx.font = '600 20px ' + serif;
+  ctx.textBaseline = 'top';
+  ctx.fillText('安  心  签', 70, 84);
+  ctx.font = '14px ' + serif; ctx.textAlign = 'right';
+  ctx.fillText(cardDate(), W - 70, 88);
+  ctx.textAlign = 'left';
+  // body text, CJK-wrapped
+  ctx.fillStyle = '#3a3134'; ctx.font = '500 32px ' + serif;
+  const maxWidth = W - 150, lineHeight = 62, lines = [];
+  let cur = '';
+  for (const ch of String(text)) {
+    if (ch === '\n' || ctx.measureText(cur + ch).width > maxWidth) { lines.push(cur); cur = ch === '\n' ? '' : ch; }
+    else cur += ch;
+  }
+  if (cur) lines.push(cur);
+  const shown = lines.slice(0, 8);
+  let y = Math.max(210, (H - shown.length * lineHeight) / 2 - 60);
+  for (const ln of shown) { ctx.fillText(ln, 76, y); y += lineHeight; }
+  // seal + brand
+  const sealY = H - 170;
+  const sg = ctx.createLinearGradient(70, sealY, 134, sealY + 64);
+  sg.addColorStop(0, '#de6a52'); sg.addColorStop(1, '#b9483a');
+  ctx.fillStyle = sg;
+  ctx.beginPath(); ctx.roundRect(70, sealY, 64, 64, 12); ctx.fill();
+  ctx.fillStyle = '#fff7f2'; ctx.font = '600 34px ' + serif;
+  ctx.fillText('安', 85, sealY + 14);
+  ctx.fillStyle = '#98a09e'; ctx.font = '600 16px ' + serif;
+  ctx.fillText('U N W I N D', 150, sealY + 12);
+  ctx.fillStyle = '#b3b8b4'; ctx.font = '13px ' + serif;
+  ctx.fillText('把压力，呼出去', 150, sealY + 38);
+  // download
+  const a = document.createElement('a');
+  a.href = canvas.toDataURL('image/png');
+  a.download = 'unwind-comfort-card.png';
+  a.click();
+}
+
+/* ================= 技能矩阵 ================= */
+const SKILL_CATS = { onetool: '厂内能力 · ONETOOL', ritual: '减压仪式 · 自研', sound: '声音引擎' };
+const skillChipByKey = {};
+async function loadSkillMatrix() {
+  try {
+    const r = await fetch(appPath('/showcase/skills'));
+    if (!r.ok) return;
+    const { skills } = await r.json();
+    const groups = $('skillGroups');
+    groups.innerHTML = '';
+    for (const cat of Object.keys(SKILL_CATS)) {
+      const items = skills.filter((s) => s.category === cat);
+      if (!items.length) continue;
+      const g = document.createElement('div');
+      g.className = 'skill-group';
+      g.innerHTML = '<div class="cap">' + esc(SKILL_CATS[cat]) + '</div>';
+      const grid = document.createElement('div');
+      grid.className = 'skill-grid';
+      for (const s of items) {
+        const chip = document.createElement('span');
+        chip.className = 'skill-chip';
+        chip.dataset.status = s.status;
+        chip.innerHTML = '<i></i>' + esc(s.label) + '<span class="tip">' + esc(s.desc) + '</span>';
+        grid.appendChild(chip);
+        skillChipByKey[s.key] = chip;
+      }
+      g.appendChild(grid);
+      groups.appendChild(g);
+    }
+    $('skillCount').textContent = skills.length + ' 项能力';
+  } catch { /* matrix is progressive enhancement */ }
+}
+loadSkillMatrix();
+function pulseSkill(key) {
+  const chip = skillChipByKey[key];
+  if (!chip) return;
+  chip.classList.remove('active');
+  void chip.offsetWidth;  // restart animation
+  chip.classList.add('active');
+  setTimeout(() => chip.classList.remove('active'), 6000);
+}
+
+/* ================= 厂内技能卡片 ================= */
+function skillCardShell(title, source) {
+  const el = document.createElement('div');
+  el.className = 'skill-card-msg';
+  el.innerHTML = '<div class="sc-head"><span>' + esc(title) + '</span>' +
+    (source ? '<span class="src">' + esc(source) + '</span>' : '') + '</div>' +
+    '<div class="sc-body"></div>';
+  return el;
+}
+function renderSkillCard(data) {
+  const card = data.skill_card;
+  if (!card || !card.type) return;
+  let el = null;
+  if (card.type === 'weekly_draft') {
+    el = skillCardShell(card.title || '周报草稿', 'WEEKLY GHOSTWRITER');
+    const body = el.querySelector('.sc-body');
+    for (const row of card.rows || []) {
+      const sec = document.createElement('div');
+      sec.className = 'wd-section';
+      sec.innerHTML = '<div class="wd-cap">' + esc(row.section) + '</div><ul>' +
+        (row.items || []).map((it) => '<li>' + esc(it) + '</li>').join('') + '</ul>';
+      body.appendChild(sec);
+    }
+    if (card.footnote) body.insertAdjacentHTML('beforeend', '<div class="sc-note">✓ ' + esc(card.footnote) + '</div>');
+  } else if (card.type === 'okr_progress') {
+    el = skillCardShell('本季度 OKR 实况', 'ENTERPRISE SEARCH');
+    const body = el.querySelector('.sc-body');
+    body.innerHTML = '<div class="okr-obj">' + esc(card.objective || '') + '</div>';
+    for (const kr of card.krs || []) {
+      const item = document.createElement('div');
+      item.className = 'okr-kr' + (kr.pct < 50 ? ' low' : '');
+      item.innerHTML = '<div class="kr-name"><span>' + esc(kr.name) + '</span><b>' + kr.pct + '%</b></div>' +
+        '<div class="okr-bar"><span class="fill"></span></div>';
+      body.appendChild(item);
+      requestAnimationFrame(() => setTimeout(() => {
+        item.querySelector('.fill').style.width = kr.pct + '%';
+      }, 150));
+    }
+    if (card.insight) body.insertAdjacentHTML('beforeend', '<div class="okr-insight">' + esc(card.insight) + '</div>');
+  } else if (card.type === 'neisou_answer') {
+    el = skillCardShell('内搜 · 确定性答案', 'NEISOU');
+    el.querySelector('.sc-body').innerHTML =
+      '<div class="ns-answer">' + esc(card.answer || '') + '</div>' +
+      '<div class="ns-meta">' +
+      (card.source ? '<span class="m">📄 ' + esc(card.source) + '</span>' : '') +
+      (card.owner ? '<span class="m">可求助：<b>' + esc(card.owner) + '</b></span>' : '') +
+      '</div>';
+  }
+  if (!el) return;
+  streamEl.appendChild(el);
+  streamEl.scrollTop = streamEl.scrollHeight;
+  // decision timeline: surface the tool trace on node 3
+  const calls = (data.tool_calls || []).filter((c) => c.name !== 'hermes_agent');
+  if (calls.length) {
+    $('n3title').textContent = '厂内工具调用';
+    $('n3body').innerHTML = calls.map((c) =>
+      line('· <b>' + esc(c.name) + '</b> — ' + esc(c.reason || '') + (c.latency_ms ? ' <span style="color:var(--text-faint)">' + c.latency_ms + ' ms</span>' : ''))
+    ).join('');
+    setNode('n3', 'done');
+  }
+}
+
+/* ================= 情境演示 director + 主动关怀 nudge ================= */
+const directorBtn = $('directorBtn'), directorMenu = $('directorMenu');
+const nudgeEl = $('nudge'), nudgeIcon = $('nudgeIcon'), nudgeTitle = $('nudgeTitle');
+const nudgeText = $('nudgeText'), nudgeAction = $('nudgeAction'), nudgeDismiss = $('nudgeDismiss');
+let nudgeConfig = null;
+directorBtn.addEventListener('click', (e) => {
+  e.stopPropagation();
+  directorMenu.hidden = !directorMenu.hidden;
+});
+document.addEventListener('click', (e) => {
+  if (!directorMenu.hidden && !e.target.closest('.director')) directorMenu.hidden = true;
+});
+directorMenu.addEventListener('click', async (e) => {
+  const btn = e.target.closest('button');
+  if (!btn) return;
+  directorMenu.hidden = true;
+  if (btn.dataset.say) { sendText(btn.dataset.say); return; }
+  const scenario = btn.dataset.scenario;
+  if (!scenario) return;
+  try {
+    const r = await fetch(appPath('/showcase/nudge?scenario=' + encodeURIComponent(scenario)));
+    if (!r.ok) return;
+    showNudge(await r.json());
+  } catch { /* demo affordance */ }
+});
+function showNudge(cfg) {
+  nudgeConfig = cfg;
+  nudgeIcon.textContent = cfg.icon || '💡';
+  nudgeTitle.textContent = cfg.title || '';
+  nudgeText.textContent = cfg.text || '';
+  nudgeAction.textContent = cfg.action_label || '好';
+  nudgeEl.hidden = false;
+  pulseSkill(cfg.skill);
+}
+nudgeAction.addEventListener('click', () => {
+  const cfg = nudgeConfig || {};
+  nudgeEl.hidden = true;
+  if (cfg.action === 'breathe') startBreathe();
+  else if (cfg.action === 'send' && cfg.action_text) sendText(cfg.action_text);
+});
+nudgeDismiss.addEventListener('click', () => { nudgeEl.hidden = true; });
 """

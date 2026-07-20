@@ -54,6 +54,7 @@ from floppy_backend.models import (
 from floppy_backend.providers.audio import build_audio_provider
 from floppy_backend.repositories import Repository
 from floppy_backend.seed import seed_assets
+from floppy_backend import showcase_skills
 from floppy_backend.services.generation import BudgetExceededError, GenerationService
 from floppy_backend.services.assets import is_placeholder_created_by
 from floppy_backend.services.hermes_agent import HermesAgentRuntime
@@ -90,6 +91,8 @@ class AppState:
     generation_service: GenerationService
     remix_service: RemixService
     agent_runtime: HermesAgentRuntime
+    settings: Settings
+    normalizer: RequestNormalizer
 
 
 state = AppState()
@@ -145,6 +148,8 @@ async def lifespan(app: FastAPI):
         directive_planner=directive_planner,
     )
     state.remix_service = RemixService(repository, storage)
+    state.settings = settings
+    state.normalizer = state.generation_service.normalizer
     state.agent_runtime = HermesAgentRuntime(
         repository=repository,
         storage=storage,
@@ -610,6 +615,16 @@ def showcase_chat(payload: dict, background_tasks: BackgroundTasks):
         raise HTTPException(status_code=400, detail="request_text is required")
     current_asset_id = payload.get("current_asset_id") or None
     _ensure_demo_profile(SHOWCASE_USER_ID)
+    # OneTool demo flows short-circuit before Hermes: deterministic, fast,
+    # and stage-proof. Everything else goes to the real agent runtime.
+    demo = showcase_skills.route_showcase_demo(
+        request_text,
+        repository=state.repository,
+        settings=state.settings,
+        normalizer=state.normalizer,
+    )
+    if demo is not None:
+        return demo
     req = AgentDecideRequest(
         user_id=SHOWCASE_USER_ID,
         request_text=request_text,
@@ -617,6 +632,21 @@ def showcase_chat(payload: dict, background_tasks: BackgroundTasks):
         current_asset_id=current_asset_id,
     )
     return _run_agent_decide(req, background_tasks)
+
+
+@app.get("/showcase/skills")
+def showcase_skill_matrix():
+    """The skill matrix rendered by the showcase frontend."""
+    return {"skills": showcase_skills.SKILL_REGISTRY}
+
+
+@app.get("/showcase/nudge")
+def showcase_nudge(scenario: str):
+    """Proactive-care scenario payloads for the demo director."""
+    payload = showcase_skills.nudge_payload(scenario)
+    if payload is None:
+        raise HTTPException(status_code=404, detail="unknown scenario")
+    return payload
 
 
 _AUDIO_MIME_BY_SUFFIX = {
