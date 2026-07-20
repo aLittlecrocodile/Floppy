@@ -1029,6 +1029,23 @@ function renderSkillCard(data) {
       (card.source ? '<span class="m">📄 ' + esc(card.source) + '</span>' : '') +
       (card.owner ? '<span class="m">可求助：<b>' + esc(card.owner) + '</b></span>' : '') +
       '</div>';
+  } else if (card.type === 'neisou_results') {
+    el = skillCardShell('内搜 · 「' + (card.query || '') + '」', 'NEISOU LIVE');
+    const body = el.querySelector('.sc-body');
+    const results = card.results || [];
+    if (results.length) {
+      for (const r of results) {
+        const item = document.createElement('div');
+        item.className = 'wd-section';
+        item.innerHTML = '<div class="wd-cap" style="cursor:' + (r.url ? 'pointer' : 'default') + '">📄 ' + esc(r.title) + '</div>' +
+          (r.snippet ? '<div class="rr-line">' + esc(r.snippet) + '</div>' : '');
+        if (r.url) item.querySelector('.wd-cap').addEventListener('click', () => window.open(r.url, '_blank'));
+        body.appendChild(item);
+      }
+    } else {
+      body.innerHTML = '<div class="rr-line">' + esc(card.status === 'unauthorized' ? '内网搜索待授权' : '这次没有拿到结果') + '</div>';
+    }
+    if (card.note) body.insertAdjacentHTML('beforeend', '<div class="sc-note">' + esc(card.note) + '</div>');
   }
   if (!el) return;
   streamEl.appendChild(el);

@@ -87,6 +87,10 @@ def test_showcase_okr_and_neisou_demo_routes(tmp_path, monkeypatch):
         okr = client.post("/showcase/chat", json={"request_text": "这季度 OKR 感觉要完不成了"}).json()
         assert okr["skill_card"]["type"] == "okr_progress"
         assert okr["skill_card"]["krs"]
+        # canned 内搜 demo only serves when the real service is unauthorized
+        from types import SimpleNamespace
+        from floppy_backend.main import state
+        monkeypatch.setattr(state, "enterprise_search", SimpleNamespace(available=False))
         ns = client.post("/showcase/chat", json={"request_text": "差旅报销流程怎么走？"}).json()
         assert ns["skill_card"]["type"] == "neisou_answer"
         assert ns["skill_card"]["owner"]

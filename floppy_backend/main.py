@@ -63,6 +63,7 @@ from floppy_backend.services.normalizer import RequestNormalizer
 from floppy_backend.services.profile import ProfileService
 from floppy_backend.services.remix import RemixService
 from floppy_backend.services.weather import WeatherService
+from floppy_backend.services.enterprise_search import EnterpriseSearchService
 from floppy_backend.services.script import SleepScriptService
 from floppy_backend.storage import LocalFileStorage, set_request_base_url
 from floppy_backend.logging_setup import AccessLogMiddleware, setup_logging
@@ -95,6 +96,7 @@ class AppState:
     settings: Settings
     normalizer: RequestNormalizer
     weather: WeatherService
+    enterprise_search: EnterpriseSearchService
 
 
 state = AppState()
@@ -153,6 +155,7 @@ async def lifespan(app: FastAPI):
     state.settings = settings
     state.normalizer = state.generation_service.normalizer
     state.weather = WeatherService()
+    state.enterprise_search = EnterpriseSearchService()
     state.agent_runtime = HermesAgentRuntime(
         repository=repository,
         storage=storage,
@@ -163,6 +166,7 @@ async def lifespan(app: FastAPI):
         settings=settings,
         directive_planner=directive_planner,
         weather=state.weather,
+        enterprise_search=state.enterprise_search,
     )
     # Seed the catalog once at startup (idempotent) so voice/demo requests
     # don't pay the ~60s seeding cost on their first call.
@@ -635,6 +639,9 @@ def showcase_chat(payload: dict, background_tasks: BackgroundTasks):
         repository=state.repository,
         settings=state.settings,
         normalizer=state.normalizer,
+        # With real 内搜 authorized, its queries go to the live agent instead
+        # of the canned demo answers.
+        neisou_is_real=state.enterprise_search.available,
     )
     if demo is not None:
         if demo.reply:
@@ -654,8 +661,16 @@ def showcase_chat(payload: dict, background_tasks: BackgroundTasks):
 
 @app.get("/showcase/skills")
 def showcase_skill_matrix():
-    """The skill matrix rendered by the showcase frontend."""
-    return {"skills": showcase_skills.SKILL_REGISTRY}
+    """The skill matrix rendered by the showcase frontend. 内搜 status is
+    dynamic: live once a ugate token is present, demo otherwise."""
+    skills = [dict(s) for s in showcase_skills.SKILL_REGISTRY]
+    neisou_live = state.enterprise_search.available
+    for skill in skills:
+        if skill["key"] == "neisou_answer":
+            skill["status"] = "live" if neisou_live else "demo"
+            if not neisou_live:
+                skill["desc"] += "（授权 ugate token 后连真实内网）"
+    return {"skills": skills}
 
 
 @app.get("/showcase/nudge")

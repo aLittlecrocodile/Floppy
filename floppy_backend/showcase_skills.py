@@ -265,7 +265,7 @@ def build_profile_context(repository, settings, user_id: str) -> ProfileContext:
     )
 
 
-def route_showcase_demo(request_text: str, *, repository, settings, normalizer) -> AgentDecideResponse | None:
+def route_showcase_demo(request_text: str, *, repository, settings, normalizer, neisou_is_real: bool = False) -> AgentDecideResponse | None:
     """Return a staged OneTool demo decision, or None to fall through to Hermes."""
     text = request_text.strip()
     compact = "".join(text.lower().split())
@@ -274,7 +274,11 @@ def route_showcase_demo(request_text: str, *, repository, settings, normalizer) 
     okr = ("okr" in compact or "kr" in compact or "季度目标" in compact) and any(
         k in compact for k in ("完不成", "来不及", "搞不定", "要砸", "凉了", "悬了", "达不成"))
     neisou_topic = next((t for t in ("报销", "晋升") if t in compact), None)
-    neisou = neisou_topic is not None and any(k in compact for k in ("流程", "怎么走", "怎么弄", "找谁", "怎么办", "截止", "材料"))
+    neisou = (
+        not neisou_is_real  # real 内搜 authorized → let the live agent handle it
+        and neisou_topic is not None
+        and any(k in compact for k in ("流程", "怎么走", "怎么弄", "找谁", "怎么办", "截止", "材料"))
+    )
 
     cbt = ("cbt" in compact or "认知重构" in compact) and not any(
         k in compact for k in ("音频", "生成", "听一段", "来一段"))

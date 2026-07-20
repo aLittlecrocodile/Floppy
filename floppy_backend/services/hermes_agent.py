@@ -38,6 +38,7 @@ _ACTIONS = {
     "chat", "play_asset", "generate_job", "remix_current", "no_match",
     # ritual actions — executed locally, surfaced to clients as action="chat"
     "mood_checkin", "worry_parking", "gratitude_moment", "update_preference", "sleep_timer",
+    "neisou_search",
 }
 _RITUAL_ACTIONS = {"mood_checkin", "worry_parking", "gratitude_moment", "update_preference", "sleep_timer"}
 _ACTION_ALIASES = {
@@ -87,6 +88,7 @@ class HermesDecision(BaseModel):
     profile_patch: dict[str, Any] | None = None
     timer_sec: int | None = Field(default=None, ge=60, le=7200)
     fade_out: bool = True
+    search_query: str | None = None
 
     def normalized_action(self) -> str:
         action = _ACTION_ALIASES.get(self.action, self.action)
@@ -208,6 +210,7 @@ class HermesAgentRuntime:
         settings: Settings,
         directive_planner=None,
         weather=None,
+        enterprise_search=None,
     ):
         self._repo = repository
         self._storage = storage
@@ -218,6 +221,7 @@ class HermesAgentRuntime:
         self._settings = settings
         self._directive_planner = directive_planner
         self._weather = weather
+        self._enterprise = enterprise_search
         self._client = HermesAgentClient(settings)
 
     def run(self, request: AgentDecideRequest) -> AgentDecideResponse:
@@ -441,6 +445,62 @@ class HermesAgentRuntime:
             ],
         )
 
+    def _execute_neisou(
+        self,
+        *,
+        request: AgentDecideRequest,
+        profile_context: ProfileContext,
+        normalized: NormalizedAudioRequest,
+        candidates: list[AudioAsset],
+        decision: HermesDecision,
+        planner_meta: PlannerMeta,
+        hermes_call: AgentToolCall,
+    ) -> AgentDecideResponse:
+        """Real 内搜: query the internal search API and answer with sources.
+        Unauthorized/failed searches degrade to an honest reply — never a
+        fabricated answer."""
+        started = time.perf_counter()
+        query = (decision.search_query or request.request_text).strip()[:60]
+        outcome = (
+            self._enterprise.neisou(query)
+            if self._enterprise is not None
+            else {"status": "unauthorized", "results": []}
+        )
+        status = outcome.get("status")
+        results = outcome.get("results", [])
+        if status == "ok":
+            reply = decision.reply or f"帮你在内网搜到了几条「{query}」的结果，卡片里可以直接点开。"
+            note = None
+        elif status == "unauthorized":
+            reply = "我还没拿到内网搜索的授权（ugate token），先帮不上这个忙——授权后我就能直接帮你查内网了。"
+            note = "内搜未授权：运行 get-ugate-token 完成一次授权即可点亮"
+        else:
+            reply = f"内网搜索这会儿没能返回「{query}」的结果，稍后我再帮你试一次。"
+            note = "内搜请求未成功，已如实告知（不编造答案）"
+        return AgentDecideResponse(
+            action="chat",
+            normalized_request=normalized,
+            profile_context=profile_context,
+            search=self._search_view(candidates),
+            asset=None,
+            reply=reply,
+            reasons=decision.reasons or ["公司内部信息，交给内搜"],
+            planner_meta=planner_meta,
+            selected_skill="neisou_answer",
+            skill_card={
+                "skill": "neisou_answer", "type": "neisou_results",
+                "query": query, "status": status, "results": results, "note": note,
+            },
+            tool_calls=[
+                hermes_call,
+                AgentToolCall(
+                    name="enterprise_search.neisou_search", status="succeeded" if status == "ok" else "failed",
+                    input={"word": query}, output={"status": status, "results": len(results)},
+                    latency_ms=int((time.perf_counter() - started) * 1000),
+                ),
+            ],
+        )
+
     def _search_view(
         self,
         candidates: list[AudioAsset],
@@ -576,6 +636,13 @@ class HermesAgentRuntime:
             if hermes_call.output is not None:
                 hermes_call.output["action"] = action
                 hermes_call.output["selected_skill"] = selected_skill
+
+        if action == "neisou_search":
+            return self._execute_neisou(
+                request=request, profile_context=profile_context, normalized=normalized,
+                candidates=candidates, decision=decision,
+                planner_meta=planner_meta, hermes_call=hermes_call,
+            )
 
         if action in _RITUAL_ACTIONS:
             return self._execute_ritual(
@@ -857,6 +924,7 @@ _HERMES_DECISION_INSTRUCTIONS = """
 - gratitude_moment：用户说出今天的小确幸（可能是你邀请后回答的）。填 gratitude_items（1-3 条原话短语）。reply 温柔复述并收下。
 - update_preference：用户表达长期偏好（"以后别放男声""我不喜欢雷声"）。填 profile_patch，白名单字段：voice_preferences / background_preferences / mood_tags / duration_preference_min（列表字段填要追加的项）。reply 自然确认（"记住了，以后不放雷声"）。仅"今晚/这次"的一次性要求不算。
 - sleep_timer：用户要定时停止/渐弱（"播 20 分钟就停"）。填 timer_sec（秒）和 fade_out。需要有 current_asset_id 或本轮正在安排播放。reply 确认（"好，20 分钟后声音会慢慢淡下去"）。
+- neisou_search：用户问只有公司内网才知道的事——地点设施（食堂/班车/健身房在哪）、流程制度（报销/请假/晋升/门禁）、内部工具用法等。填 search_query（提炼成简洁关键词，如"食堂 位置"）。reply 简短告知你去内网查了；具体结果由系统以卡片呈现，不要自己编造内网信息。日常闲聊和通用知识不要用它。
 
 chat 之下还有六个「对话技能」：命中时 action 仍为 chat，但把 selected_skill 填成对应技能名，reply 按该技能的方式来写：
 - reframe_thought：用户想做认知重构/CBT（"来一次CBT""帮我捋捋这个想法"），或表达灾难化/绝对化想法（"我肯定要被裁了""我什么都做不好"）。用苏格拉底式提问温柔引导，一次只问一个问题，不说教（例："最坏的情况，真的比其他可能都大吗？"）。**CBT 是对话练习，绝不因此生成音频**，除非用户明确说想"听"一段引导音频。用户表露自伤/危机信号时立即停止引导，转为直接关怀并提示求助渠道（如心理援助热线 400-161-9995），reasons 里加 "crisis"。
@@ -891,7 +959,7 @@ chat 之下还有六个「对话技能」：命中时 action 仍为 chat，但�
 
 只输出一个 JSON 对象，不要 Markdown，不要解释。格式：
 {
-  "action": "chat|play_asset|generate_job|remix_current|no_match|mood_checkin|worry_parking|gratitude_moment|update_preference|sleep_timer",
+  "action": "chat|play_asset|generate_job|remix_current|no_match|mood_checkin|worry_parking|gratitude_moment|update_preference|sleep_timer|neisou_search",
   "selected_skill": "chat|reframe_thought|relax_tip|counting_ritual|encourage_me|destress_knowledge|comfort_card|play_asset|generate_sleep_audio|remix_current|no_match",
   "asset_id": null,
   "remix_sound_type": null,
@@ -902,6 +970,7 @@ chat 之下还有六个「对话技能」：命中时 action 仍为 chat，但�
   "profile_patch": null,
   "timer_sec": null,
   "fade_out": true,
+  "search_query": null,
   "reply": "给用户看的一句话",
   "reasons": ["简短中文原因"],
   "confidence": 0.0
