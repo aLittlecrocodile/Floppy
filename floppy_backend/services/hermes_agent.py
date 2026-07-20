@@ -445,6 +445,32 @@ class HermesAgentRuntime:
             ],
         )
 
+    def run_neisou(self, request: AgentDecideRequest) -> AgentDecideResponse:
+        """Deterministic intranet fast path: obvious 内网 questions skip the
+        decision LLM entirely and hit real 内搜 directly (~1s vs ~5s)."""
+        started = time.perf_counter()
+        profile_context = self._profile_context(request.user_id)
+        normalized = self._normalizer.normalize(
+            GenerationRequest(request_text=request.request_text), profile_context
+        )
+        router_call = AgentToolCall(
+            name="intranet_router", status="succeeded",
+            input={"request_text": request.request_text},
+            output={"route": "neisou_search"},
+            latency_ms=int((time.perf_counter() - started) * 1000),
+            reason="内网问题白名单直达，跳过决策 LLM",
+        )
+        planner_meta = PlannerMeta(
+            planner_source="neisou_fast", planner_confidence=0.95,
+            planner_latency_ms=int((time.perf_counter() - started) * 1000),
+        )
+        decision = HermesDecision(action="neisou_search", search_query=request.request_text[:60])
+        return self._execute_neisou(
+            request=request, profile_context=profile_context, normalized=normalized,
+            candidates=[], decision=decision,
+            planner_meta=planner_meta, hermes_call=router_call,
+        )
+
     def _execute_neisou(
         self,
         *,
@@ -469,7 +495,11 @@ class HermesAgentRuntime:
         status = outcome.get("status")
         results = outcome.get("results", [])
         if status == "ok":
-            reply = decision.reply or f"帮你在内网搜到了几条「{query}」的结果，卡片里可以直接点开。"
+            # Speak the ANSWER, not a "查一下稍等" promise — the search has
+            # already run by the time this reply reaches the user.
+            top = results[0]
+            fragment = (top.get("snippet") or top.get("title") or "").strip()[:56]
+            reply = f"查到了：{fragment}……来源我放在卡片里了，点开就能看全文。"
             note = None
         elif status == "unauthorized":
             reply = "我还没拿到内网搜索的授权（ugate token），先帮不上这个忙——授权后我就能直接帮你查内网了。"

@@ -297,6 +297,27 @@ def route_showcase_demo(request_text: str, *, repository, settings, normalizer, 
     return _reframe_dialog(normalized, profile_context)
 
 
+_INTRANET_NOUNS = (
+    "食堂", "班车", "健身房", "门禁", "工卡", "考勤", "会议室", "停车", "车位",
+    "报销", "请假", "晋升", "公积金", "社保", "入职", "转岗", "工位", "年假",
+    "体检", "餐补", "打印机", "快递", "咖啡厅", "母婴室",
+)
+_INTRANET_INTENTS = (
+    "在哪", "哪里", "几点", "时间", "怎么", "如何", "流程", "多少", "什么",
+    "指南", "规则", "政策", "吗", "?", "？",
+)
+
+
+def is_intranet_quick(text: str) -> bool:
+    """Obvious intranet questions worth the deterministic 内搜 fast path:
+    a company-facility/process noun plus an information-seeking hint, short
+    enough to be a lookup rather than venting."""
+    compact = "".join(text.split())
+    if len(compact) > 30:
+        return False
+    return any(n in compact for n in _INTRANET_NOUNS) and any(i in compact for i in _INTRANET_INTENTS)
+
+
 NUDGES: dict[str, dict[str, Any]] = {
     "post_meeting": {
         "icon": "☕",

@@ -106,6 +106,40 @@ def test_showcase_cbt_routes_to_dialog_not_audio(tmp_path, monkeypatch):
         assert data["job_id"] is None
 
 
+def test_intranet_quick_pattern():
+    from floppy_backend.showcase_skills import is_intranet_quick
+
+    assert is_intranet_quick("食堂在哪")
+    assert is_intranet_quick("班车几点发车？")
+    assert is_intranet_quick("请假流程是什么")
+    assert not is_intranet_quick("食堂的饭太难吃了，好烦")          # venting, no lookup intent
+    assert not is_intranet_quick("今天好累")                        # no intranet noun
+    assert not is_intranet_quick("我想跟你聊聊最近报销单据堆积带来的巨大压力和焦虑感受该怎么调节")  # too long
+
+
+def test_showcase_neisou_fast_path_speaks_the_answer(tmp_path, monkeypatch):
+    """食堂在哪 → deterministic real-search path: no decision LLM, and the
+    reply carries the answer instead of a 稍等 promise."""
+    _configure_tmp_app(monkeypatch, tmp_path)
+    with TestClient(app) as client:
+        from types import SimpleNamespace
+        from floppy_backend.main import state
+        fake = SimpleNamespace(
+            available=True,
+            neisou=lambda q, **k: {"status": "ok", "results": [
+                {"title": "百度生活小贴士", "url": "http://ku/x", "snippet": "食堂位置：1号楼与2号楼B1各有一个"},
+            ]},
+        )
+        monkeypatch.setattr(state, "enterprise_search", fake)
+        state.agent_runtime._enterprise = fake
+        data = client.post("/showcase/chat", json={"request_text": "食堂在哪"}).json()
+        assert data["planner_meta"]["planner_source"] == "neisou_fast"
+        assert data["selected_skill"] == "neisou_answer"
+        assert "1号楼" in data["reply"]
+        assert "稍等" not in data["reply"]
+        assert data["skill_card"]["results"][0]["url"] == "http://ku/x"
+
+
 def test_showcase_nudge_scenarios(tmp_path, monkeypatch):
     _configure_tmp_app(monkeypatch, tmp_path)
     with TestClient(app) as client:

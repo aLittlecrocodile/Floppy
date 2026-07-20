@@ -653,6 +653,11 @@ def showcase_chat(payload: dict, background_tasks: BackgroundTasks):
         generation_allowed=True,
         current_asset_id=current_asset_id,
     )
+    if state.enterprise_search.available and showcase_skills.is_intranet_quick(request_text):
+        response = state.agent_runtime.run_neisou(req)
+        if response.reply:
+            response.reply_audio_url = _reply_audio_url(response.reply)
+        return response
     response = _run_agent_decide(req, background_tasks)
     if response.reply:
         response.reply_audio_url = _reply_audio_url(response.reply)

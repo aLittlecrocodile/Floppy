@@ -145,14 +145,29 @@ def _extract_results(payload: Any, *, limit: int) -> list[dict[str, str]]:
             continue
         seen.add(title)
         url = str(node.get("url") or node.get("docUrl") or node.get("link") or node.get("resourceUrl") or "")
-        snippet = _strip_marks(str(
+        snippet = _clean_snippet(_strip_marks(str(
             node.get("summary") or node.get("abstract") or node.get("content")
             or node.get("desc") or node.get("snippet") or ""
-        ))[:140]
+        )))[:140]
         results.append({"title": title[:80], "url": url, "snippet": snippet})
         if len(results) >= limit:
             break
     return results
+
+
+def _clean_snippet(text: str) -> str:
+    """FAQ-database hits embed record structure（知识分类/标准问题/相似问题/答案）
+    before the actual answer — keep only the answer body, drop boilerplate
+    greetings, so replies speak the answer itself."""
+    for marker in ("答案：", "答案:"):
+        if marker in text:
+            text = text.split(marker, 1)[1]
+            break
+    for greeting in ("同学你好，", "同学您好，", "您好，", "你好，"):
+        if text.startswith(greeting):
+            text = text[len(greeting):]
+            break
+    return text.strip()
 
 
 def _strip_marks(text: str) -> str:
