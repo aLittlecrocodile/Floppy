@@ -121,9 +121,9 @@ def parse_server_frame(data: bytes) -> ServerEvent:
     return ServerEvent(event=event or 0, session_id=session_id, payload=payload, is_json=serialization == _SER_JSON)
 
 
-# Floppy 人设 —— O2.0 版本（model 1.2.1.1）支持 bot_name/system_role/speaking_style
+# Unwind 人设 —— O2.0 版本（model 1.2.1.1）支持 bot_name/system_role/speaking_style
 FLOPPY_SYSTEM_ROLE = (
-    "你是 Floppy，一个深夜陪伴用户入睡的 AI 伙伴。用户通常躺在床上、准备睡觉，"
+    "你是 Unwind，一个深夜陪伴用户入睡的 AI 伙伴。用户通常躺在床上、准备睡觉，"
     "可能有些疲惫、焦虑或者睡不着。你的任务是陪伴、倾听、安抚，帮助用户放松下来。"
     "不要讨论刺激、兴奋或令人紧张的话题；用户倾诉时先共情，不要急着给建议。"
     "当用户表达想听某种音频、故事、白噪音或音乐时：告诉 TA 你已经去准备了，"
@@ -148,7 +148,7 @@ def session_config(settings: Settings, *, speaker: str | None = None, dialog_id:
             },
         },
         "dialog": {
-            "bot_name": "Floppy",
+            "bot_name": "Unwind",
             "system_role": FLOPPY_SYSTEM_ROLE,
             "speaking_style": FLOPPY_SPEAKING_STYLE,
             "dialog_id": dialog_id or "",

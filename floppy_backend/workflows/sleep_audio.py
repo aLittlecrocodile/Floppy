@@ -4,8 +4,8 @@ import time
 from dataclasses import dataclass
 
 from floppy_backend.config import Settings
-from floppy_backend.models import AudioAsset, AudioAssetIn, AudioScript, GenerationDirective, NormalizedAudioRequest, UserProfile
-from floppy_backend.providers.audio import AudioGenerationProvider, GeneratedAudio
+from floppy_backend.models import AudioAsset, AudioAssetIn, AudioScript, AudioType, GenerationDirective, NormalizedAudioRequest, UserProfile
+from floppy_backend.providers.audio import AudioGenerationProvider, GeneratedAudio, GeneratedMusic
 from floppy_backend.repositories import Repository
 from floppy_backend.services import script_guard
 from floppy_backend.services.minimax_hubless import build_sleep_music_prompt, ffmpeg_mix, probe_audio
@@ -132,14 +132,22 @@ class SleepAudioWorkflowService:
         script: AudioScript | None,
         directive: GenerationDirective | None = None,
     ) -> SleepAudioWorkflowResult:
-        if script is None:
+        pure_music = normalized.intent == AudioType.MUSIC
+        if script is None and not pure_music:
             script = self.prepare_script(user_id=user_id, normalized=normalized, profile=profile, directive=directive)
 
-        if script.safety_status != "approved":
+        if script is not None and script.safety_status != "approved":
             notes = ", ".join(script.safety_notes)
             raise script_guard.ScriptGuardError(f"script guard rejected script: {script.safety_status}; {notes}")
 
-        request = self.build_request(user_id=user_id, cache_key=cache_key, normalized=normalized, profile=profile, title_hint=script.title)
+        title_hint = script.title if script is not None else self._music_title(normalized, directive)
+        request = self.build_request(
+            user_id=user_id,
+            cache_key=cache_key,
+            normalized=normalized,
+            profile=profile,
+            title_hint=title_hint,
+        )
         started = time.perf_counter()
         generated = self._generate_audio(user_id=user_id, cache_key=cache_key, normalized=normalized, request=request, script=script)
         asset = self._upsert_asset(
@@ -157,8 +165,16 @@ class SleepAudioWorkflowService:
         cache_key: str,
         normalized: NormalizedAudioRequest,
         request: SleepAudioWorkflowRequest,
-        script: AudioScript,
+        script: AudioScript | None,
     ) -> GeneratedAudio:
+        if normalized.intent == AudioType.MUSIC:
+            return self._generate_pure_music(
+                user_id=user_id,
+                cache_key=cache_key,
+                normalized=normalized,
+                request=request,
+            )
+
         output_ext = "mp3" if self.provider.name == "minimax_t2a" else "wav"
         music_mix_enabled = self._music_mix_enabled(request)
         suffix = "_voice" if music_mix_enabled else ""
@@ -168,12 +184,50 @@ class SleepAudioWorkflowService:
             normalized,
             path,
             object_key,
-            script_text=script.script_text,
-            title=script.title,
+            script_text=script.script_text if script is not None else None,
+            title=script.title if script is not None else request.intent.title_hint,
         )
         if music_mix_enabled:
             return self._mix_minimax_music_layer(user_id=user_id, cache_key=cache_key, normalized=normalized, request=request, speech=generated)
         return generated
+
+    def _generate_pure_music(
+        self,
+        *,
+        user_id: str,
+        cache_key: str,
+        normalized: NormalizedAudioRequest,
+        request: SleepAudioWorkflowRequest,
+    ) -> GeneratedAudio:
+        """Generate instrumental audio without creating a spoken script."""
+        output_ext = "mp3" if self.provider.name == "minimax_t2a" else "wav"
+        object_key = f"ondemand/{user_id}/{cache_key[:16]}.{output_ext}"
+        path = self.storage.path_for(object_key)
+        title = request.intent.title_hint or self._music_title(normalized, None)
+        if self.provider.name == "minimax_t2a" and hasattr(self.provider, "generate_instrumental_music"):
+            music_prompt = self._music_prompt(normalized, request.intent.title_hint)
+            music: GeneratedMusic = self.provider.generate_instrumental_music(  # type: ignore[attr-defined]
+                music_prompt,
+                path,
+                object_key,
+                title=title,
+            )
+            return GeneratedAudio(
+                object_key=music.object_key,
+                path=music.path,
+                duration_sec=music.duration_sec,
+                title=music.title,
+                content_hash=music.content_hash,
+                provider_model=music.provider_model,
+                provider_status=music.provider_status,
+                provider_payload={
+                    "music": music.provider_payload,
+                    "music_prompt": music_prompt,
+                    "music_object_key": music.object_key,
+                },
+            )
+
+        return self.provider.generate(normalized, path, object_key, title=title)
 
     def _mix_minimax_music_layer(
         self,
@@ -283,23 +337,37 @@ class SleepAudioWorkflowService:
         *,
         request: SleepAudioWorkflowRequest,
         normalized: NormalizedAudioRequest,
-        script: AudioScript,
+        script: AudioScript | None,
         generated: GeneratedAudio,
         asset: AudioAsset,
     ) -> WorkflowStatusResponse:
+        pure_music = normalized.intent == AudioType.MUSIC
         music_enabled = self._music_mix_enabled(request)
-        steps = [
-            WorkflowStepState(name="script", status=WorkflowStepStatus.SUCCEEDED),
-            WorkflowStepState(name="speech", status=WorkflowStepStatus.SUCCEEDED),
-            WorkflowStepState(name="music", status=WorkflowStepStatus.SUCCEEDED if music_enabled else WorkflowStepStatus.SKIPPED),
-            WorkflowStepState(name="mix_audio", status=WorkflowStepStatus.SUCCEEDED if music_enabled else WorkflowStepStatus.SKIPPED),
-            WorkflowStepState(name="asset", status=WorkflowStepStatus.SUCCEEDED),
-        ]
+        if pure_music:
+            steps = [
+                WorkflowStepState(name="script", status=WorkflowStepStatus.SKIPPED),
+                WorkflowStepState(name="speech", status=WorkflowStepStatus.SKIPPED),
+                WorkflowStepState(name="music", status=WorkflowStepStatus.SUCCEEDED),
+                WorkflowStepState(name="mix_audio", status=WorkflowStepStatus.SKIPPED),
+                WorkflowStepState(name="asset", status=WorkflowStepStatus.SUCCEEDED),
+            ]
+        else:
+            steps = [
+                WorkflowStepState(name="script", status=WorkflowStepStatus.SUCCEEDED),
+                WorkflowStepState(name="speech", status=WorkflowStepStatus.SUCCEEDED),
+                WorkflowStepState(name="music", status=WorkflowStepStatus.SUCCEEDED if music_enabled else WorkflowStepStatus.SKIPPED),
+                WorkflowStepState(name="mix_audio", status=WorkflowStepStatus.SUCCEEDED if music_enabled else WorkflowStepStatus.SKIPPED),
+                WorkflowStepState(name="asset", status=WorkflowStepStatus.SUCCEEDED),
+            ]
         provider_payload = generated.provider_payload or {}
         mix_payload = provider_payload.get("mix") if isinstance(provider_payload, dict) else None
-        voice_object_key = (mix_payload or {}).get("voice_object_key") or generated.object_key
+        voice_object_key = None if pure_music else ((mix_payload or {}).get("voice_object_key") or generated.object_key)
         music_object_key = (mix_payload or {}).get("music_object_key")
-        mixed_object_key = (mix_payload or {}).get("mixed_object_key") or generated.object_key
+        if pure_music and isinstance(provider_payload, dict):
+            music_object_key = provider_payload.get("music_object_key") or generated.object_key
+        mixed_object_key = (mix_payload or {}).get("mixed_object_key")
+        if not pure_music:
+            mixed_object_key = mixed_object_key or generated.object_key
         return WorkflowStatusResponse(
             workflow_run_id=stable_id("wf", {"request_id": request.request_id, "object_key": generated.object_key}),
             request_id=request.request_id,
@@ -314,9 +382,9 @@ class SleepAudioWorkflowService:
                 content_type=normalized.intent,
             ),
             diagnostics=WorkflowDiagnostics(
-                script_hash=script.script_hash,
-                script_chars=len(script.script_text),
-                voice_id=self._resolved_voice_id(normalized.voice_style),
+                script_hash=script.script_hash if script else None,
+                script_chars=len(script.script_text) if script else None,
+                voice_id=None if pure_music else self._resolved_voice_id(normalized.voice_style),
                 voice_object_key=voice_object_key,
                 music_object_key=music_object_key,
                 mixed_object_key=mixed_object_key,
@@ -347,12 +415,34 @@ class SleepAudioWorkflowService:
 
     def _music_mix_enabled(self, request: SleepAudioWorkflowRequest) -> bool:
         return (
-            self.provider.name == "minimax_t2a"
+            request.intent.content_type != AudioType.MUSIC
+            and self.provider.name == "minimax_t2a"
             and self.settings is not None
             and self.settings.minimax_enable_music_mix
             and request.constraints.allow_background_music
             and hasattr(self.provider, "generate_instrumental_music")
         )
+
+    def _music_prompt(self, normalized: NormalizedAudioRequest, title_hint: str | None) -> str:
+        prompt = build_sleep_music_prompt(normalized)
+        if title_hint and title_hint not in prompt:
+            prompt = f"{prompt}, inspired by {title_hint}"
+        return prompt
+
+    def _music_title(self, normalized: NormalizedAudioRequest, directive: GenerationDirective | None) -> str:
+        if directive is not None:
+            if directive.content_brief:
+                return directive.content_brief[:120]
+            if directive.key_elements:
+                return directive.key_elements[0][:120]
+        topic_titles = {
+            "piano": "钢琴曲",
+            "violin": "小提琴曲",
+            "guitar": "吉他轻音乐",
+            "jazz": "爵士轻音乐",
+            "classical": "古典轻音乐",
+        }
+        return topic_titles.get(normalized.content_topic[0], "助眠音乐") if normalized.content_topic else "助眠音乐"
 
     def _default_mix_preferences(self, normalized: NormalizedAudioRequest) -> MixPreferences:
         if self.settings is None:

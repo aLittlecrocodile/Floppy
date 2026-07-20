@@ -3,9 +3,23 @@ SHOWCASE_SCRIPT = r"""
 const USER_ID = 'showcase_user';
 const $ = (id) => document.getElementById(id);
 
+// The showcase can run at /showcase or under /unwind/showcase beside another
+// application. Resolve the mount prefix once so all API and WebSocket calls
+// stay same-origin in either deployment mode.
+const APP_BASE = (() => {
+  const parts = location.pathname.split('/').filter(Boolean);
+  const showcaseIndex = parts.lastIndexOf('showcase');
+  return showcaseIndex > 0 ? '/' + parts.slice(0, showcaseIndex).join('/') : '';
+})();
+const appPath = (path) => APP_BASE + path;
+
 const streamEl = $('stream'), promptEl = $('prompt'), sendBtn = $('send'), talkBtn = $('talk');
 const nowbar = $('nowbar'), playBtn = $('playBtn'), npTitle = $('npTitle'), npSub = $('npSub');
 const player = $('player'), ttsPlayer = $('ttsPlayer');
+const callBtn = $('callBtn'), callOverlay = $('callOverlay'), callClose = $('callClose');
+const callState = $('callState'), callTimer = $('callTimer'), callWave = $('callWave');
+const callAvatar = $('callAvatar'), callTranscript = $('callTranscript');
+const callMute = $('callMute'), callMuteLabel = $('callMuteLabel'), callHangup = $('callHangup');
 
 const SKILL_LABELS = {
   play_asset: '播放已有音频',
@@ -39,10 +53,10 @@ const esc = (s) => String(s ?? '').replace(/[&<>"]/g, (c) => ({'&':'&amp;','<':'
 /* ---------- health ---------- */
 async function checkHealth() {
   try {
-    const r = await fetch('/health'); const d = await r.json();
+    const r = await fetch(appPath('/health')); const d = await r.json();
     const ok = d.hermes === 'ok';
     $('healthDot').className = 'dot ' + (ok ? 'ok' : 'down');
-    $('healthText').textContent = ok ? 'Hermes 决策在线' : 'Hermes 离线 · 降级模式';
+    $('healthText').textContent = ok ? '智能体决策在线' : '智能体离线 · 降级模式';
   } catch { $('healthDot').className = 'dot down'; $('healthText').textContent = '服务不可达'; }
 }
 checkHealth(); setInterval(checkHealth, 30000);
@@ -58,16 +72,17 @@ function tlReset() {
   $('n3title').textContent = '生成指令要点'; $('n3body').innerHTML = '';
   $('n4meta').textContent = ''; $('n4body').innerHTML = '';
   setNode('n1', 'running');
-  $('n1body').innerHTML = '<span class="line">Hermes 正在理解你的请求…</span>';
+  $('n1body').innerHTML = '<span class="line">智能体正在理解你的请求…</span>';
 }
 function setNode(id, state) { $(id).className = state === 'running' ? 'active running' : 'active ' + state; }
 const line = (t) => '<div class="line">' + t + '</div>';
+const sourceLabel = (source) => ({ hermes: '智能体', exact_cache: '精确缓存' }[source] || source || '—');
 
 function renderIntentNode(data) {
   const pm = data.planner_meta || {};
   const cached = pm.planner_source === 'exact_cache';
   setNode('n1', 'done');
-  $('n1meta').textContent = cached ? '' : ('决策来源 ' + (pm.planner_source || '—') + ' · ' + (pm.planner_latency_ms || 0) + ' ms');
+    $('n1meta').textContent = cached ? '' : ('决策来源 ' + sourceLabel(pm.planner_source) + ' · ' + (pm.planner_latency_ms || 0) + ' ms');
   const intent = data.normalized_request && data.normalized_request.intent;
   let html = '';
   if (cached) {
@@ -126,7 +141,7 @@ function execTool(data) {
 /* ---------- fallback suggestions ---------- */
 async function showSuggestions(container) {
   try {
-    const r = await fetch('/users/' + USER_ID + '/recommendations?limit=3');
+    const r = await fetch(appPath('/users/' + USER_ID + '/recommendations?limit=3'));
     if (!r.ok) return;
     const items = await r.json();
     if (!items.length) return;
@@ -156,7 +171,7 @@ async function sendText(text) {
   tlReset();
   const thinking = addMsg('assistant', '<span class="shimmer">Unwind 正在思考…</span>');
   try {
-    const r = await fetch('/showcase/chat', {
+    const r = await fetch(appPath('/showcase/chat'), {
       method: 'POST', headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ request_text: text, current_asset_id: currentAssetId }),
     });
@@ -261,7 +276,7 @@ function pollJob(jobId) {
     if (Date.now() - started > 240000) { clearInterval(pollTimer); jobFailed('生成超时了'); return; }
     let job;
     try {
-      const r = await fetch('/generation-jobs/' + jobId);
+      const r = await fetch(appPath('/generation-jobs/' + jobId));
       if (!r.ok) return;
       job = await r.json();
     } catch { return; }
@@ -297,7 +312,7 @@ function pollRemix(jobId) {
     if (Date.now() - started > 90000) { clearInterval(pollTimer); jobFailed('混音超时了'); return; }
     let job;
     try {
-      const r = await fetch('/remix-jobs/' + jobId);
+      const r = await fetch(appPath('/remix-jobs/' + jobId));
       if (!r.ok) return;
       job = await r.json();
     } catch { return; }
@@ -340,13 +355,35 @@ $('chips').addEventListener('click', (e) => {
   if (e.target.classList.contains('chip')) sendText(e.target.textContent);
 });
 
-/* ================= voice (push-to-talk over /voice/ws) ================= */
+/* ================= voice capture primitives ================= */
 const TARGET_RATE = 16000, FRAME_MS = 200;
-const wsUrl = (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/voice/ws?user_id=' + USER_ID;
-let ws = null, audioCtx = null, workletNode = null, micStream = null, micSource = null;
-let recording = false, inputRate = 48000, resampleBuffer = [], sentBytes = 0;
-let vUserEl = null, vAssistantEl = null, vAssistantText = '', audioParts = [], pendingAsset = null;
-let voiceReady = false;
+const wsScheme = location.protocol === 'https:' ? 'wss://' : 'ws://';
+const pttWsUrl = wsScheme + location.host + appPath('/voice/ws?user_id=' + USER_ID);
+const realtimeWsUrl = wsScheme + location.host + appPath('/voice/realtime?user_id=' + USER_ID);
+const MIC_OPTIONS = { audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true } };
+
+async function createCaptureWorklet(context, mediaStream, onFrame) {
+  const workletCode = `
+    class UnwindPCMWorklet extends AudioWorkletProcessor {
+      process(inputs) {
+        const channel = inputs[0][0];
+        if (channel && channel.length) this.port.postMessage(channel.slice(0));
+        return true;
+      }
+    }
+    registerProcessor('unwind-pcm-capture', UnwindPCMWorklet);
+  `;
+  const moduleUrl = URL.createObjectURL(new Blob([workletCode], { type: 'application/javascript' }));
+  await context.audioWorklet.addModule(moduleUrl);
+  URL.revokeObjectURL(moduleUrl);
+  const source = context.createMediaStreamSource(mediaStream);
+  const node = new AudioWorkletNode(context, 'unwind-pcm-capture');
+  const silent = context.createGain();
+  silent.gain.value = 0;
+  node.port.onmessage = (event) => onFrame(event.data);
+  source.connect(node); node.connect(silent); silent.connect(context.destination);
+  return { source, node, silent };
+}
 
 function resample(f32, fromRate) {
   if (fromRate === TARGET_RATE) return f32;
@@ -362,6 +399,13 @@ function floatToInt16(f32) {
   for (let i = 0; i < f32.length; i++) { const s = Math.max(-1, Math.min(1, f32[i])); out[i] = s < 0 ? s * 0x8000 : s * 0x7fff; }
   return out.buffer;
 }
+
+/* ================= push-to-talk over /voice/ws ================= */
+let ws = null, audioCtx = null, workletNode = null, micStream = null, micSource = null, micMonitor = null;
+let recording = false, pttHeld = false, inputRate = 48000, resampleBuffer = [], sentBytes = 0;
+let vUserEl = null, vAssistantEl = null, vAssistantText = '', audioParts = [], pendingAsset = null;
+let voiceReady = false, audioInitPromise = null;
+
 function onAudioFrame(f32) {
   const rs = resample(f32, inputRate);
   for (let i = 0; i < rs.length; i++) resampleBuffer.push(rs[i]);
@@ -380,31 +424,17 @@ function flushTail() {
   }
 }
 async function initAudio() {
-  micStream = await navigator.mediaDevices.getUserMedia({
-    audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true },
-  });
+  micStream = await navigator.mediaDevices.getUserMedia(MIC_OPTIONS);
   audioCtx = new (window.AudioContext || window.webkitAudioContext)();
   inputRate = audioCtx.sampleRate;
-  const workletCode = `
-    class PCMWorklet extends AudioWorkletProcessor {
-      process(inputs) {
-        const ch = inputs[0][0];
-        if (ch && ch.length) this.port.postMessage(ch.slice(0));
-        return true;
-      }
-    }
-    registerProcessor('pcm-worklet', PCMWorklet);
-  `;
-  await audioCtx.audioWorklet.addModule(URL.createObjectURL(new Blob([workletCode], { type: 'application/javascript' })));
-  micSource = audioCtx.createMediaStreamSource(micStream);
-  workletNode = new AudioWorkletNode(audioCtx, 'pcm-worklet');
-  workletNode.port.onmessage = (e) => { if (recording) onAudioFrame(e.data); };
-  micSource.connect(workletNode);
+  const capture = await createCaptureWorklet(audioCtx, micStream, (frame) => { if (recording) onAudioFrame(frame); });
+  micSource = capture.source; workletNode = capture.node; micMonitor = capture.silent;
 }
 function connectWS() {
-  ws = new WebSocket(wsUrl);
+  if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return;
+  ws = new WebSocket(pttWsUrl);
   ws.binaryType = 'arraybuffer';
-  ws.onopen = () => { talkBtn.disabled = false; };
+  ws.onopen = () => { talkBtn.disabled = false; talkBtn.title = '按住说话'; };
   ws.onclose = () => { talkBtn.disabled = true; talkBtn.title = '语音连接已断开'; };
   ws.onerror = () => { talkBtn.disabled = true; talkBtn.title = '语音服务暂不可用'; };
   ws.onmessage = (ev) => {
@@ -438,12 +468,26 @@ function playVoiceReply() {
 }
 async function ensureVoice() {
   if (voiceReady) return;
-  await initAudio();
   connectWS();
   voiceReady = true;
 }
-function startUtterance() {
+async function startUtterance() {
+  pttHeld = true;
   if (recording || !ws || ws.readyState !== WebSocket.OPEN) return;
+  if (!audioCtx) {
+    talkBtn.textContent = '正在开启麦克风…';
+    try {
+      audioInitPromise = audioInitPromise || initAudio();
+      await audioInitPromise;
+    } catch (error) {
+      audioInitPromise = null;
+      talkBtn.textContent = '按住说话'; talkBtn.disabled = true;
+      talkBtn.title = '麦克风不可用';
+      addMsg('system', '未能打开麦克风：' + esc(error.message || '请检查浏览器权限'));
+      return;
+    }
+  }
+  if (!pttHeld || !ws || ws.readyState !== WebSocket.OPEN) { talkBtn.textContent = '按住说话'; return; }
   recording = true;
   if (audioCtx.state === 'suspended') audioCtx.resume();
   talkBtn.classList.add('recording'); talkBtn.textContent = '松开结束';
@@ -451,6 +495,7 @@ function startUtterance() {
   audioParts = []; resampleBuffer = []; sentBytes = 0;
 }
 function endUtterance() {
+  pttHeld = false;
   if (!recording) return;
   recording = false;
   flushTail();
@@ -458,14 +503,208 @@ function endUtterance() {
   if (sentBytes < 3200) addMsg('system', '几乎没有采集到声音，请检查麦克风');
   ws.send(JSON.stringify({ type: 'utterance_end' }));
 }
-talkBtn.addEventListener('mousedown', startUtterance);
-talkBtn.addEventListener('mouseup', endUtterance);
-talkBtn.addEventListener('mouseleave', () => { if (recording) endUtterance(); });
-talkBtn.addEventListener('touchstart', (e) => { e.preventDefault(); startUtterance(); });
-talkBtn.addEventListener('touchend', (e) => { e.preventDefault(); endUtterance(); });
+talkBtn.addEventListener('pointerdown', (event) => {
+  event.preventDefault(); talkBtn.setPointerCapture(event.pointerId); startUtterance();
+});
+talkBtn.addEventListener('pointerup', endUtterance);
+talkBtn.addEventListener('pointercancel', endUtterance);
+talkBtn.addEventListener('lostpointercapture', () => { if (pttHeld || recording) endUtterance(); });
+
+/* ================= realtime call over /voice/realtime ================= */
+const CALL_FRAME_SAMPLES = 320;
+let callWs = null, callInputCtx = null, callOutputCtx = null, callMicStream = null;
+let callCaptureNode = null, callCaptureSource = null, callCaptureMonitor = null;
+let callInputBuffer = [], callReady = false, callMutedState = false, callEnding = false;
+let callStartedAt = 0, callTimerHandle = null, callNextPlayTime = 0;
+let callSources = new Set(), callUserLine = null, callAssistantLine = null, callAssistantText = '';
+let callPendingAsset = null;
+
+function setCallState(text, mode) {
+  callState.textContent = text;
+  callState.classList.toggle('call-error', mode === 'error');
+  const active = mode === 'listening' || mode === 'speaking';
+  callWave.classList.toggle('active', active);
+  callAvatar.classList.toggle('live', active || mode === 'connected');
+  callAvatar.classList.toggle('speaking', mode === 'speaking');
+}
+function formatCallTime(seconds) {
+  const mins = Math.floor(seconds / 60), secs = seconds % 60;
+  return String(mins).padStart(2, '0') + ':' + String(secs).padStart(2, '0');
+}
+function startCallTimer() {
+  callStartedAt = Date.now(); clearInterval(callTimerHandle);
+  const tick = () => { callTimer.textContent = formatCallTime(Math.floor((Date.now() - callStartedAt) / 1000)); };
+  tick(); callTimerHandle = setInterval(tick, 1000);
+}
+function resetCallTranscript() {
+  callTranscript.innerHTML = '<p class="empty">通话字幕会显示在这里</p>';
+  callUserLine = null; callAssistantLine = null; callAssistantText = '';
+}
+function appendCallLine(role, label, text, existing) {
+  const empty = callTranscript.querySelector('.empty'); if (empty) empty.remove();
+  const lineEl = existing || document.createElement('p');
+  lineEl.className = 'call-line ' + role;
+  lineEl.innerHTML = '<strong>' + esc(label) + '</strong><span>' + esc(text) + '</span>';
+  if (!existing) callTranscript.appendChild(lineEl);
+  callTranscript.scrollTop = callTranscript.scrollHeight;
+  return lineEl;
+}
+function appendCallSystem(text) { appendCallLine('system', '', text, null); }
+
+function pushRealtimeAudio(frame) {
+  if (!callReady || callMutedState || !callWs || callWs.readyState !== WebSocket.OPEN) return;
+  const samples = resample(frame, callInputCtx.sampleRate);
+  for (let i = 0; i < samples.length; i++) callInputBuffer.push(samples[i]);
+  while (callInputBuffer.length >= CALL_FRAME_SAMPLES) {
+    callWs.send(floatToInt16(Float32Array.from(callInputBuffer.splice(0, CALL_FRAME_SAMPLES))));
+  }
+}
+function stopCallPlayback() {
+  for (const source of callSources) { try { source.stop(); } catch {} }
+  callSources.clear();
+  callNextPlayTime = callOutputCtx ? callOutputCtx.currentTime : 0;
+}
+function queueCallPCM(arrayBuffer) {
+  if (!callOutputCtx || !arrayBuffer.byteLength) return;
+  const view = new DataView(arrayBuffer), sampleCount = Math.floor(arrayBuffer.byteLength / 2);
+  const floats = new Float32Array(sampleCount);
+  for (let i = 0; i < sampleCount; i++) floats[i] = view.getInt16(i * 2, true) / 32768;
+  const audioBuffer = callOutputCtx.createBuffer(1, sampleCount, 24000);
+  audioBuffer.copyToChannel(floats, 0);
+  const source = callOutputCtx.createBufferSource();
+  source.buffer = audioBuffer; source.connect(callOutputCtx.destination);
+  const startAt = Math.max(callOutputCtx.currentTime + .025, callNextPlayTime);
+  source.start(startAt); callNextPlayTime = startAt + audioBuffer.duration;
+  callSources.add(source); source.onended = () => callSources.delete(source);
+  setCallState('Unwind 正在回应', 'speaking');
+}
+function queuedCallAsset() {
+  if (!callPendingAsset) return;
+  const pending = callPendingAsset; callPendingAsset = null;
+  const playAsset = () => playAudio(pending.url, pending.title, '通话中为你准备', pending.id);
+  if (pending.notifyUrl) {
+    ttsPlayer.src = pending.notifyUrl; ttsPlayer.onended = playAsset;
+    ttsPlayer.play().catch(playAsset);
+  } else playAsset();
+}
+function cleanupRealtimeCall(playPending) {
+  clearInterval(callTimerHandle); callTimerHandle = null;
+  stopCallPlayback();
+  if (callMicStream) callMicStream.getTracks().forEach((track) => track.stop());
+  if (callCaptureNode) callCaptureNode.disconnect();
+  if (callCaptureSource) callCaptureSource.disconnect();
+  if (callCaptureMonitor) callCaptureMonitor.disconnect();
+  if (callInputCtx && callInputCtx.state !== 'closed') callInputCtx.close();
+  if (callOutputCtx && callOutputCtx.state !== 'closed') callOutputCtx.close();
+  callInputCtx = null; callOutputCtx = null; callMicStream = null;
+  callCaptureNode = null; callCaptureSource = null; callCaptureMonitor = null;
+  callInputBuffer = []; callReady = false; callMutedState = false;
+  callMute.setAttribute('aria-pressed', 'false'); callMuteLabel.textContent = '静音';
+  callAvatar.classList.remove('live', 'speaking'); callWave.classList.remove('active');
+  callBtn.disabled = false; talkBtn.disabled = !(ws && ws.readyState === WebSocket.OPEN);
+  document.body.classList.remove('call-open'); callOverlay.hidden = true;
+  if (playPending) queuedCallAsset(); else callPendingAsset = null;
+}
+function finishRealtimeCall(playPending) {
+  if (callEnding) return; callEnding = true;
+  setCallState('正在结束通话', 'connected');
+  const socket = callWs; callWs = null;
+  if (socket && socket.readyState === WebSocket.OPEN) {
+    try { socket.send(JSON.stringify({ type: 'stop' })); } catch {}
+    setTimeout(() => { try { socket.close(); } catch {} }, 100);
+  }
+  setTimeout(() => { cleanupRealtimeCall(playPending); callEnding = false; }, 180);
+}
+function handleRealtimeEvent(message) {
+  if (message.type === 'ready') {
+    callReady = true; startCallTimer(); setCallState('已接通，我在听', 'listening');
+  } else if (message.type === 'asr_info') {
+    stopCallPlayback(); setCallState('我在听', 'listening');
+  } else if (message.type === 'asr') {
+    const text = (message.text || '').trim(); if (!text) return;
+    callUserLine = appendCallLine('user', '你', text, callUserLine);
+    if (!message.interim) { addMsg('user', esc(text)); callUserLine = null; }
+  } else if (message.type === 'chat') {
+    callAssistantText += message.text || '';
+    callAssistantLine = appendCallLine('assistant', 'Unwind', callAssistantText, callAssistantLine);
+    setCallState('Unwind 正在回应', 'speaking');
+  } else if (message.type === 'tts_end') {
+    if (callAssistantText) addMsg('assistant', esc(callAssistantText));
+    callAssistantText = ''; callAssistantLine = null;
+    if (callPendingAsset) {
+      appendCallSystem('专属音频已准备好，即将为你播放');
+      finishRealtimeCall(true);
+    } else setCallState('我在听', 'listening');
+  } else if (message.type === 'generation_started') {
+    appendCallSystem('智能体正在为你准备专属音频');
+  } else if (message.type === 'generation_done') {
+    const audio = message.audio || {};
+    const url = audio.streamUrl || audio.playback_url || audio.url;
+    if (url) callPendingAsset = {
+      url, title: audio.title || '专属音频', id: audio.id || null, notifyUrl: message.notifyAudioUrl || null,
+    };
+    appendCallSystem('专属音频已生成完成');
+  } else if (message.type === 'session_end') {
+    finishRealtimeCall(true);
+  } else if (message.type === 'error') {
+    appendCallSystem(message.message || '通话发生错误');
+    setCallState(message.message || '通话发生错误', 'error');
+  }
+}
+async function startRealtimeCall() {
+  if (callWs && (callWs.readyState === WebSocket.OPEN || callWs.readyState === WebSocket.CONNECTING)) {
+    callOverlay.hidden = false; document.body.classList.add('call-open'); return;
+  }
+  callEnding = false; callPendingAsset = null; callBtn.disabled = true; talkBtn.disabled = true;
+  callOverlay.hidden = false; document.body.classList.add('call-open');
+  resetCallTranscript(); callTimer.textContent = '00:00'; setCallState('正在申请麦克风权限', 'connecting');
+  try {
+    callMicStream = await navigator.mediaDevices.getUserMedia(MIC_OPTIONS);
+    callInputCtx = new (window.AudioContext || window.webkitAudioContext)();
+    callOutputCtx = new (window.AudioContext || window.webkitAudioContext)();
+    await callInputCtx.resume(); await callOutputCtx.resume();
+    const capture = await createCaptureWorklet(callInputCtx, callMicStream, pushRealtimeAudio);
+    callCaptureSource = capture.source; callCaptureNode = capture.node; callCaptureMonitor = capture.silent;
+    setCallState('正在接通', 'connecting');
+    callWs = new WebSocket(realtimeWsUrl); callWs.binaryType = 'arraybuffer';
+    callWs.onmessage = (event) => {
+      if (event.data instanceof ArrayBuffer) { queueCallPCM(event.data); return; }
+      let message; try { message = JSON.parse(event.data); } catch { return; }
+      handleRealtimeEvent(message);
+    };
+    callWs.onerror = () => setCallState('通话服务暂不可用', 'error');
+    callWs.onclose = () => {
+      if (!callEnding) {
+        setCallState(callReady ? '通话已结束' : '未能接通，请稍后再试', 'error');
+        setTimeout(() => cleanupRealtimeCall(true), 180);
+      }
+    };
+  } catch (error) {
+    if (callMicStream) callMicStream.getTracks().forEach((track) => track.stop());
+    if (callInputCtx && callInputCtx.state !== 'closed') callInputCtx.close();
+    if (callOutputCtx && callOutputCtx.state !== 'closed') callOutputCtx.close();
+    callMicStream = null; callInputCtx = null; callOutputCtx = null;
+    appendCallSystem(error.message || '无法使用麦克风');
+    setCallState('无法使用麦克风，请检查浏览器权限', 'error');
+    callBtn.disabled = false; talkBtn.disabled = !(ws && ws.readyState === WebSocket.OPEN);
+  }
+}
+
+callBtn.addEventListener('click', startRealtimeCall);
+callHangup.addEventListener('click', () => finishRealtimeCall(true));
+callClose.addEventListener('click', () => finishRealtimeCall(true));
+callMute.addEventListener('click', () => {
+  callMutedState = !callMutedState;
+  callMute.setAttribute('aria-pressed', String(callMutedState));
+  callMuteLabel.textContent = callMutedState ? '取消静音' : '静音';
+  setCallState(callMutedState ? '已静音' : '我在听', callMutedState ? 'connected' : 'listening');
+});
+document.addEventListener('keydown', (event) => {
+  if (event.key === 'Escape' && !callOverlay.hidden) finishRealtimeCall(true);
+});
 
 (async () => {
   try { await ensureVoice(); }
-  catch { talkBtn.disabled = true; talkBtn.title = '麦克风不可用，语音功能已关闭'; }
+  catch { talkBtn.disabled = true; talkBtn.title = '语音服务暂不可用'; }
 })();
 """

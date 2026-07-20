@@ -1,11 +1,11 @@
-# Floppy 后端启动指南（交接给协作 agent）
+# Unwind 后端启动指南
 
-> 给接手的 agent / 同事：如何在本机或服务器把 Floppy 后端跑起来，对接前端联调。
-> 代码已推到私有仓库 `aLittlecrocodile/Floppy`，分支 `feature/hermes-agent-migration`。
+> 给接手的 agent / 同事：如何在本机或服务器启动 Unwind 后端并完成前端联调。
+> 当前仓库包含 Unwind 后端、体验页和音频生成链路；历史调研文档统一放在 `docs/research/`。
 
 ## 0. 这是什么
 
-Floppy 是 AI 助眠音频陪伴后端（FastAPI）。能力：
+Unwind 是 AI 减压陪伴后端（FastAPI）。能力：
 
 - **智能体决策**（`/agent/decide`）：理解用户需求 → 命中已有音频直接播 / 未命中则**智能体提炼内容指令 → workflow 生成真人声**。
 - **实时语音对话**（WebSocket `/voice/ws`）：火山 ASR → 对话 LLM → MiniMax 流式 TTS，支持「听故事/放雨声/冥想」音频意图。

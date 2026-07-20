@@ -28,8 +28,14 @@ Two deterministic guards remain outside Hermes:
 FLOPPY_HERMES_BASE_URL=http://127.0.0.1:8642
 FLOPPY_HERMES_API_KEY=change-me-local-dev
 FLOPPY_HERMES_MODEL=hermes-agent
+FLOPPY_HERMES_API_STYLE=responses  # use chat for OneAPI gateways without /responses
 FLOPPY_HERMES_CATALOG_LIMIT=60   # max assets shown to Hermes per decision
 ```
+
+The client supports both OpenAI Responses and Chat Completions. When using an
+OpenAI-compatible gateway that only exposes `/v1/chat/completions`, set
+`FLOPPY_HERMES_API_STYLE=chat`; `FLOPPY_QUERY_PLANNER_API_KEY` is used as the
+Hermes key when `FLOPPY_HERMES_API_KEY` is empty.
 
 When Hermes is unreachable, the runtime degrades to `no_match` (plus catalog suggestions in `search.results`) and `planner_meta.fallback_reason` starts with `hermes_unavailable:`. `planner_meta.planner_source` is `hermes`, or `exact_cache` when the short-circuit fired.
 

@@ -7,6 +7,7 @@ from floppy_backend.config import Settings
 from floppy_backend.models import (
     AudioAsset,
     AudioScript,
+    AudioType,
     EventIn,
     GenerationBudget,
     GenerationJob,
@@ -264,6 +265,10 @@ class GenerationService:
         profile = self.repository.get_profile(user_id)
         normalized = self.normalizer.normalize(request, profile)
         directive = request.directive
+        # The agent's directive carries the effective media type. Apply it
+        # before cache lookup so a music request cannot reuse a speech asset.
+        if directive is not None and directive.intent is not None:
+            normalized = normalized.model_copy(update={"intent": directive.intent})
         cache_key = self.cache_key_for(normalized, directive, request_text=request.request_text)
 
         if allow_cache and not request.force_generate:
@@ -282,14 +287,7 @@ class GenerationService:
                 )
                 return PreparedGeneration(normalized=normalized, cache_key=cache_key, cached_asset=asset, match_type="exact")
 
-        # The agent's directive knows the real content intent better than the
-        # keyword normalizer (which mislabels, e.g. "温和幽默" → white_noise via
-        # profile fallback). Override AFTER cache_key computation — the cache
-        # key must stay stable or repeat requests regenerate paid TTS.
-        if directive is not None and directive.intent is not None:
-            normalized = normalized.model_copy(update={"intent": directive.intent})
-
-        if not prepare_script:
+        if not prepare_script or normalized.intent == AudioType.MUSIC:
             return PreparedGeneration(
                 normalized=normalized, cache_key=cache_key, cached_asset=None, match_type="generated", script=None, directive=directive
             )

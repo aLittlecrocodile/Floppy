@@ -51,6 +51,9 @@ class Settings(BaseSettings):
     hermes_base_url: str = "http://127.0.0.1:8642"
     hermes_api_key: str | None = None
     hermes_model: str = "hermes-agent"
+    # Hermes-compatible endpoints may expose either OpenAI Responses or Chat
+    # Completions. The local OneAPI gateway currently supports chat only.
+    hermes_api_style: str = "responses"  # "responses" | "chat"
     hermes_timeout_sec: float = 30.0
     hermes_store_conversation: bool = True
     # Max catalog assets shown to Hermes per decision (curated first, newest

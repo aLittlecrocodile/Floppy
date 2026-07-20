@@ -1,0 +1,19 @@
+[Unit]
+Description=Unwind AI wellbeing showcase
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=unwind
+Group=unwind
+WorkingDirectory=/opt/unwind
+EnvironmentFile=/opt/unwind/.env
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/unwind/.venv/bin/uvicorn floppy_backend.main:app --host 127.0.0.1 --port 8010 --proxy-headers --forwarded-allow-ips=127.0.0.1
+Restart=always
+RestartSec=5
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target

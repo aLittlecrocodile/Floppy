@@ -251,7 +251,18 @@ class Repository:
         return self._script_from_row(row) if row is not None else None
 
     def list_assets(self, limit: int = 500, tier: str | None = None) -> list[AudioAsset]:
-        query = "SELECT * FROM audio_assets WHERE safety_status = 'approved'"
+        # Older builds mislabeled TTS speech as music. Keep those invalid rows
+        # for job diagnostics, but never expose them as playable catalog items.
+        query = """
+            SELECT * FROM audio_assets
+            WHERE safety_status = 'approved'
+              AND id NOT IN (
+                  SELECT asset_id FROM generation_jobs
+                  WHERE normalized_intent = 'music'
+                    AND provider_model LIKE 'speech-%'
+                    AND asset_id IS NOT NULL
+              )
+        """
         params: list = []
         if tier is not None:
             query += " AND tier = ?"

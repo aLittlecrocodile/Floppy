@@ -1,7 +1,7 @@
 [project]
 name = "floppy-backend"
 version = "0.1.0"
-description = "Backend and algorithm MVP for Floppy, an AI sleep audio companion."
+description = "Backend and algorithm MVP for Unwind, an AI stress-relief companion."
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [

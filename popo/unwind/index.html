@@ -1,0 +1,333 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Unwind，让大家的压力小一点。懂你的智能体，用文字、语音和专属内容陪你缓一缓。">
+  <title>Unwind · 让大家压力小一点</title>
+  <style>
+    :root {
+      --paper: #fbf6ef;
+      --paper-deep: #f3e5d9;
+      --ink: #2c1d22;
+      --muted: #756166;
+      --wine: #4e1e25;
+      --orange: #f2764b;
+      --orange-deep: #d95636;
+      --green: #47705a;
+      --line: rgba(78, 30, 37, 0.16);
+    }
+
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      color: var(--ink);
+      background: var(--paper);
+      font-family: "PingFang SC", "HarmonyOS Sans SC", "Microsoft YaHei", sans-serif;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    a { color: inherit; }
+
+    .topbar {
+      position: absolute;
+      z-index: 10;
+      inset: 0 0 auto;
+      height: 74px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 clamp(22px, 5vw, 76px);
+      color: #fff9f4;
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 11px;
+      font-family: Georgia, "Songti SC", serif;
+      font-size: 24px;
+      font-weight: 700;
+    }
+
+    .brand img {
+      width: 40px;
+      height: 40px;
+      object-fit: cover;
+      border-radius: 6px;
+      background: #fff8f1;
+    }
+
+    .top-link {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 14px;
+      font-weight: 600;
+      text-decoration: none;
+      border-bottom: 1px solid rgba(255, 249, 244, 0.66);
+      padding: 7px 0;
+    }
+
+    .hero {
+      position: relative;
+      min-height: min(82svh, 760px);
+      overflow: hidden;
+      display: flex;
+      align-items: center;
+      color: #fff9f4;
+      background: #151429;
+    }
+
+    .hero-media,
+    .hero-shade {
+      position: absolute;
+      inset: 0;
+    }
+
+    .hero-media {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      object-position: center;
+    }
+
+    .hero-shade {
+      background:
+        linear-gradient(90deg, rgba(31, 12, 18, 0.97) 0%, rgba(50, 18, 24, 0.91) 34%, rgba(42, 17, 27, 0.42) 65%, rgba(18, 15, 36, 0.08) 100%),
+        linear-gradient(0deg, rgba(21, 12, 20, 0.44), transparent 42%);
+    }
+
+    .hero-copy {
+      position: relative;
+      z-index: 2;
+      width: min(600px, 100%);
+      padding: 104px clamp(22px, 7vw, 112px) 68px;
+    }
+
+    .eyebrow {
+      margin: 0 0 17px;
+      color: #ffad83;
+      font-size: 13px;
+      font-weight: 700;
+    }
+
+    h1 {
+      margin: 0;
+      font-family: Georgia, "Songti SC", serif;
+      font-size: clamp(52px, 7vw, 88px);
+      line-height: 1;
+      letter-spacing: 0;
+    }
+
+    .headline {
+      margin: 24px 0 0;
+      max-width: 520px;
+      font-size: clamp(28px, 3.5vw, 48px);
+      line-height: 1.2;
+      font-weight: 600;
+      letter-spacing: 0;
+    }
+
+    .headline strong { color: #ff956c; }
+
+    .lead {
+      margin: 22px 0 0;
+      max-width: 470px;
+      color: rgba(255, 249, 244, 0.78);
+      font-size: 16px;
+      line-height: 1.85;
+    }
+
+    .actions {
+      display: flex;
+      align-items: center;
+      gap: 18px;
+      margin-top: 32px;
+      flex-wrap: wrap;
+    }
+
+    .primary {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 10px;
+      min-height: 50px;
+      padding: 0 24px;
+      border-radius: 6px;
+      color: #fff;
+      background: var(--orange);
+      box-shadow: 0 14px 30px rgba(37, 9, 14, 0.26);
+      font-size: 15px;
+      font-weight: 700;
+      text-decoration: none;
+      transition: transform 160ms ease, background 160ms ease;
+    }
+
+    .primary:hover { transform: translateY(-2px); background: var(--orange-deep); }
+    .primary:focus-visible { outline: 3px solid #fff; outline-offset: 3px; }
+
+    .note {
+      color: rgba(255, 249, 244, 0.65);
+      font-size: 13px;
+    }
+
+    .story {
+      padding: clamp(64px, 9vw, 112px) clamp(22px, 7vw, 112px);
+      background: var(--paper);
+    }
+
+    .story-inner {
+      width: min(1160px, 100%);
+      margin: 0 auto;
+      display: grid;
+      grid-template-columns: minmax(240px, 0.75fr) minmax(0, 1.4fr);
+      gap: clamp(48px, 8vw, 120px);
+      align-items: start;
+    }
+
+    .section-kicker {
+      margin: 0 0 16px;
+      color: var(--orange-deep);
+      font-size: 13px;
+      font-weight: 700;
+    }
+
+    .story h2 {
+      margin: 0;
+      font-family: Georgia, "Songti SC", serif;
+      font-size: clamp(30px, 4vw, 48px);
+      line-height: 1.28;
+      letter-spacing: 0;
+    }
+
+    .story-intro {
+      margin: 22px 0 0;
+      color: var(--muted);
+      font-size: 15px;
+      line-height: 1.8;
+    }
+
+    .feature-list {
+      border-top: 1px solid var(--line);
+    }
+
+    .feature {
+      display: grid;
+      grid-template-columns: 62px minmax(0, 1fr);
+      gap: 20px;
+      padding: 26px 0;
+      border-bottom: 1px solid var(--line);
+    }
+
+    .feature-num {
+      color: var(--orange-deep);
+      font-family: Georgia, serif;
+      font-size: 14px;
+      font-weight: 700;
+    }
+
+    .feature h3 {
+      margin: 0 0 8px;
+      font-size: 18px;
+      letter-spacing: 0;
+    }
+
+    .feature p {
+      margin: 0;
+      color: var(--muted);
+      font-size: 14px;
+      line-height: 1.75;
+    }
+
+    .closing {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 28px;
+      padding: 46px clamp(22px, 7vw, 112px);
+      color: #fff8f1;
+      background: var(--wine);
+    }
+
+    .closing p {
+      margin: 0;
+      font-family: Georgia, "Songti SC", serif;
+      font-size: clamp(20px, 3vw, 31px);
+    }
+
+    .closing .primary { flex: 0 0 auto; }
+
+    @media (max-width: 760px) {
+      .topbar { height: 64px; }
+      .brand { font-size: 21px; }
+      .brand img { width: 36px; height: 36px; }
+      .top-link { font-size: 13px; }
+      .hero { min-height: 84svh; align-items: flex-end; }
+      .hero-media { object-position: 64% center; }
+      .hero-shade {
+        background:
+          linear-gradient(0deg, rgba(39, 14, 20, 0.98) 2%, rgba(43, 15, 22, 0.88) 52%, rgba(22, 17, 39, 0.23) 100%),
+          linear-gradient(90deg, rgba(45, 15, 22, 0.68), transparent);
+      }
+      .hero-copy { padding: 110px 22px 46px; }
+      h1 { font-size: 54px; }
+      .headline { max-width: 420px; font-size: 32px; }
+      .lead { font-size: 15px; line-height: 1.7; }
+      .note { width: 100%; }
+      .story-inner { grid-template-columns: 1fr; gap: 42px; }
+      .feature { grid-template-columns: 48px minmax(0, 1fr); }
+      .closing { align-items: flex-start; flex-direction: column; }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      html { scroll-behavior: auto; }
+      .primary { transition: none; }
+    }
+  </style>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand"><img src="baidu-bear.png" alt="百度小熊">Unwind</div>
+    <a class="top-link" href="https://180.76.101.189/unwind/showcase" target="_blank" rel="noopener">进入体验 <span aria-hidden="true">→</span></a>
+  </header>
+
+  <main>
+    <section class="hero" aria-label="Unwind 品牌主视觉">
+      <img class="hero-media" src="unwind-cover-final.png" alt="Unwind 让大家压力小一点的品牌主视觉">
+      <div class="hero-shade" aria-hidden="true"></div>
+    </section>
+
+    <section class="story" aria-labelledby="story-title">
+      <div class="story-inner">
+        <div>
+          <p class="section-kicker">为什么是 Unwind</p>
+          <h2 id="story-title">忙完这一阵，<br>也别忘了照顾自己。</h2>
+          <p class="story-intro">不需要学习复杂的功能，只要说出你现在的感受。智能体会理解、选择并执行适合你的减压方式。</p>
+        </div>
+
+        <div class="feature-list">
+          <article class="feature">
+            <span class="feature-num">01</span>
+            <div><h3>先听懂，再回应</h3><p>从一句自然表达里理解情绪、场景和偏好，不用在功能菜单里来回选择。</p></div>
+          </article>
+          <article class="feature">
+            <span class="feature-num">02</span>
+            <div><h3>多种方式，随时陪伴</h3><p>文字对话、语音通话、音乐生成与环境声播放，让减压方式适应你的当下。</p></div>
+          </article>
+          <article class="feature">
+            <span class="feature-num">03</span>
+            <div><h3>越用越懂你的节奏</h3><p>记住有效的内容和偏好，再次需要时更快找到熟悉、合适的那一段。</p></div>
+          </article>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="closing">
+    <p>给忙碌留一处温柔的出口。</p>
+    <a class="primary" href="https://180.76.101.189/unwind/showcase" target="_blank" rel="noopener">打开 Unwind <span aria-hidden="true">→</span></a>
+  </footer>
+</body>
+</html>

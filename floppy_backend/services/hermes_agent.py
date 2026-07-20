@@ -43,6 +43,27 @@ _ACTION_ALIASES = {
 }
 
 
+def _explicit_generation_requested(text: str) -> bool:
+    compact = "".join(text.lower().split())
+    if any(negative in compact for negative in ("不用生成", "不要生成", "别生成")):
+        return False
+    return any(
+        phrase in compact
+        for phrase in (
+            "给我生成",
+            "帮我生成",
+            "我要生成",
+            "生成一",
+            "生成个",
+            "重新生成",
+            "再生成",
+            "创作一",
+            "写一首",
+            "做一段",
+        )
+    )
+
+
 class HermesDecision(BaseModel):
     action: str
     selected_skill: str | None = None
@@ -77,8 +98,12 @@ class HermesAgentClient:
     def __init__(self, settings: Settings):
         self._base_url = settings.hermes_base_url.rstrip("/")
         self._responses_url = f"{self._base_url}/responses" if self._base_url.endswith("/v1") else f"{self._base_url}/v1/responses"
-        self._api_key = settings.hermes_api_key
+        self._chat_url = f"{self._base_url}/chat/completions" if self._base_url.endswith("/v1") else f"{self._base_url}/v1/chat/completions"
+        self._api_key = settings.hermes_api_key or settings.query_planner_api_key
         self._model = settings.hermes_model
+        self._api_style = settings.hermes_api_style.strip().lower()
+        if self._api_style not in {"responses", "chat"}:
+            raise ValueError("FLOPPY_HERMES_API_STYLE must be 'responses' or 'chat'")
         # connect=3s: a black-holed Hermes must fail fast (3s, not 30s);
         # the configured timeout still governs read/write/pool.
         self._timeout = httpx.Timeout(settings.hermes_timeout_sec, connect=3.0)
@@ -100,20 +125,39 @@ class HermesAgentClient:
         if self._api_key:
             headers["Authorization"] = f"Bearer {self._api_key}"
 
-        response = httpx.post(
-            self._responses_url,
-            headers=headers,
-            json={
-                "model": self._model,
-                "input": prompt,
-                "instructions": _HERMES_DECISION_INSTRUCTIONS,
-                "store": self._store,
-                "conversation": f"floppy-agent:{request.user_id}",
-            },
-            timeout=self._timeout,
-        )
-        response.raise_for_status()
-        text = _responses_output_text(response.json())
+        if self._api_style == "chat":
+            response = httpx.post(
+                self._chat_url,
+                headers=headers,
+                json={
+                    "model": self._model,
+                    "messages": [
+                        {"role": "system", "content": _HERMES_DECISION_INSTRUCTIONS},
+                        {"role": "user", "content": prompt},
+                    ],
+                    "stream": False,
+                    "max_tokens": 1200,
+                },
+                timeout=self._timeout,
+            )
+            response.raise_for_status()
+            text = _chat_output_text(response.json())
+        else:
+            response = httpx.post(
+                self._responses_url,
+                headers=headers,
+                json={
+                    "model": self._model,
+                    "input": prompt,
+                    "instructions": _HERMES_DECISION_INSTRUCTIONS,
+                    "store": self._store,
+                    "conversation": f"floppy-agent:{request.user_id}",
+                },
+                timeout=self._timeout,
+            )
+            response.raise_for_status()
+            text = _responses_output_text(response.json())
+
         payload = _extract_json_object(text)
         decision = HermesDecision.model_validate(payload)
         decision.normalized_action()
@@ -174,7 +218,11 @@ class HermesAgentRuntime:
         exact = self._repo.get_asset_by_prompt_hash(cache_key)
         if exact is not None and not self._asset_file_exists(exact):
             exact = None  # stale DB row — the audio file is gone, never serve it
-        if exact is not None and self._repo.has_generation_request(cache_key, request.request_text):
+        if (
+            exact is not None
+            and not _explicit_generation_requested(request.request_text)
+            and self._repo.has_generation_request(cache_key, request.request_text)
+        ):
             return self._exact_cache_response(request, profile_context, normalized, exact)
 
         candidates = self._catalog_candidates()
@@ -352,6 +400,15 @@ class HermesAgentRuntime:
             planner_latency_ms=hermes_latency_ms,
         )
 
+        if request.generation_allowed and _explicit_generation_requested(request.request_text) and action == "play_asset":
+            action = "generate_job"
+            selected_skill = "generate_sleep_audio"
+            extra_reasons.append("用户明确要求生成新内容，已跳过现有资产")
+            hermes_call.reason = "explicit generation request overrides catalog playback"
+            if hermes_call.output is not None:
+                hermes_call.output["action"] = action
+                hermes_call.output["selected_skill"] = selected_skill
+
         if action == "chat":
             return AgentDecideResponse(
                 action="chat",
@@ -515,6 +572,21 @@ def _responses_output_text(payload: dict[str, Any]) -> str:
     return text
 
 
+def _chat_output_text(payload: dict[str, Any]) -> str:
+    choices = payload.get("choices")
+    if not isinstance(choices, list) or not choices:
+        raise ValueError("Hermes chat response did not contain choices")
+    content = choices[0].get("message", {}).get("content")
+    if isinstance(content, str) and content.strip():
+        return content.strip()
+    if isinstance(content, list):
+        chunks = [item.get("text", "") for item in content if isinstance(item, dict)]
+        text = "".join(chunk for chunk in chunks if isinstance(chunk, str)).strip()
+        if text:
+            return text
+    raise ValueError("Hermes chat response did not contain output text")
+
+
 def _extract_json_object(text: str) -> dict[str, Any]:
     fenced = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, flags=re.DOTALL)
     if fenced:
@@ -570,7 +642,7 @@ def _build_decision_prompt(
 
 
 _HERMES_DECISION_INSTRUCTIONS = """
-你是 Floppy——一个温柔的睡前陪伴智能体。用户在睡前跟你聊天、倾诉，或想听点助眠的声音。你同时是资源匹配的唯一裁决者：catalog 是当前全部可播放的音频目录（未经算法过滤）。
+你是 Unwind——一个温柔的睡前陪伴智能体。用户在睡前跟你聊天、倾诉，或想听点助眠的声音。你同时是资源匹配的唯一裁决者：catalog 是当前全部可播放的音频目录（未经算法过滤）。
 
 每一轮你做两件事：
 1) 选择本轮 action；

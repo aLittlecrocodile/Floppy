@@ -183,7 +183,8 @@ class _RequestBaseURLMiddleware:
             headers = {key: value for key, value in scope.get("headers") or []}
             host = headers.get(b"host", b"").decode("latin-1").strip()
             scheme = scope.get("scheme") or "http"
-            set_request_base_url(f"{scheme}://{host}" if host else None)
+            forwarded_prefix = headers.get(b"x-forwarded-prefix", b"").decode("latin-1").strip().rstrip("/")
+            set_request_base_url(f"{scheme}://{host}{forwarded_prefix}" if host else None)
         await self.app(scope, receive, send)
 
 
@@ -390,6 +391,14 @@ def showcase_page():
     from floppy_backend.showcase_page import SHOWCASE_HTML
     from floppy_backend.showcase_script import SHOWCASE_SCRIPT
     return SHOWCASE_HTML.replace("__SCRIPT__", SHOWCASE_SCRIPT)
+
+
+@app.get("/showcase/assets/baidu-bear.png", include_in_schema=False)
+def showcase_baidu_bear():
+    asset = Path(__file__).with_name("assets") / "baidu_bear.png"
+    if not asset.is_file():
+        raise HTTPException(status_code=404, detail="showcase asset not found")
+    return FileResponse(asset, media_type="image/png")
 
 
 @app.get("/demo", response_class=HTMLResponse)

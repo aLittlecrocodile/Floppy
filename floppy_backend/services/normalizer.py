@@ -32,6 +32,8 @@ class RequestNormalizer:
             return AudioType.MEDITATION
         if any(keyword in text for keyword in ["白噪音", "雨声", "海浪", "风声", "white noise"]):
             return AudioType.WHITE_NOISE
+        if any(keyword in text for keyword in ["音乐", "钢琴", "小提琴", "吉他", "曲子", "乐曲", "music"]):
+            return AudioType.MUSIC
         if any(keyword in text for keyword in ["asmr", "低语"]):
             return AudioType.ASMR
         if any(keyword in text for keyword in ["文章", "播客", "书", "摘要"]):
@@ -109,6 +111,11 @@ class RequestNormalizer:
             "星星": "stars",
             "猫": "cat",
             "城市": "city",
+            "钢琴": "piano",
+            "小提琴": "violin",
+            "吉他": "guitar",
+            "爵士": "jazz",
+            "古典": "classical",
         }
         for keyword, topic in mapping.items():
             if keyword in text:

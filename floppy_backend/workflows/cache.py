@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 from floppy_backend.config import Settings
-from floppy_backend.models import NormalizedAudioRequest
+from floppy_backend.models import AudioType, NormalizedAudioRequest
 from floppy_backend.utils import sha256_json
 
 
 SCRIPT_POLICY_VERSION = "sleep_script.v1"
 MUSIC_PROMPT_POLICY_VERSION = "sleep_music_prompt.v1"
+MUSIC_GENERATION_POLICY_VERSION = "music_generation.v2"
 MIX_POLICY_VERSION = "sleep_mix.v1"
 
 
@@ -38,6 +39,9 @@ def build_sleep_audio_cache_key(
             "voice_profile": normalized.voice_style,
             "tts_model": settings.minimax_model if is_minimax and settings else provider_name,
             "music_prompt_policy_version": MUSIC_PROMPT_POLICY_VERSION,
+            "music_generation_policy_version": (
+                MUSIC_GENERATION_POLICY_VERSION if normalized.intent == AudioType.MUSIC else None
+            ),
             "music_model": settings.minimax_music_model if music_mix_enabled and settings else None,
             "mix_policy_version": MIX_POLICY_VERSION,
             "mix_preset": normalized.intent.value,

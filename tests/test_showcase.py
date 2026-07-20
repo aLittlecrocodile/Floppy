@@ -18,8 +18,17 @@ def test_showcase_page_serves_branding(tmp_path, monkeypatch):
         resp = client.get("/showcase")
         assert resp.status_code == 200
         assert "Unwind" in resp.text
-        assert "Hermes 决策轨迹" in resp.text
+        assert "智能体决策轨迹" in resp.text
+        assert "Hermes" not in resp.text
+        assert 'id="callBtn"' in resp.text
+        assert 'id="callOverlay"' in resp.text
+        assert "/voice/ws?user_id=" in resp.text
+        assert "/voice/realtime?user_id=" in resp.text
         assert "__SCRIPT__" not in resp.text  # script placeholder must be substituted
+
+        logo = client.get("/showcase/assets/baidu-bear.png")
+        assert logo.status_code == 200
+        assert logo.headers["content-type"].startswith("image/png")
 
         root = client.get("/", follow_redirects=False)
         assert root.status_code in {302, 307}
