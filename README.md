@@ -1,6 +1,6 @@
-# Floppy Backend MVP
+# 墨息 Truce · Backend MVP
 
-工程级 MVP，覆盖 Floppy 后端与算法主链路：
+面向高压研发团队的 AI 原生降压工具。工程级 MVP，覆盖墨息（Truce）后端与算法主链路：
 
 - 音频资产库：SQLite 元数据 + 本地对象存储目录，接口上可替换为 TOS/OSS/S3。
 - 用户画像：冷启动问卷 + 轻量行为画像。
