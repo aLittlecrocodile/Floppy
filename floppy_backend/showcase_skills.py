@@ -34,30 +34,40 @@ from floppy_backend.models import (
 SKILL_REGISTRY: list[dict[str, Any]] = [
     # --- OneTool 厂内能力 ---
     {"key": "calendar_sense", "label": "下会缓冲舱", "category": "onetool", "status": "demo",
-     "desc": "感知日程密度，连轴会后主动递上 90 秒喘息"},
+     "desc": "感知日程密度，连轴会后主动递上 90 秒喘息",
+     "demo_scenario": "post_meeting"},
     {"key": "weekly_ghostwriter", "label": "周报代写", "category": "onetool", "status": "demo",
-     "desc": "从工作痕迹整理周报草稿，把压力源直接消掉"},
+     "desc": "从工作痕迹整理周报草稿，把压力源直接消掉",
+     "demo_say": "周报还没写，帮我搞定"},
     {"key": "okr_reframe", "label": "OKR 实据重构", "category": "onetool", "status": "demo",
-     "desc": "用真实 KR 进度反驳灾难化想法"},
+     "desc": "用真实 KR 进度反驳灾难化想法",
+     "demo_say": "这季度 OKR 感觉要完不成了"},
     {"key": "neisou_answer", "label": "内搜兜底", "category": "onetool", "status": "demo",
-     "desc": "流程焦虑交给内搜，给确定性答案和该找的人"},
+     "desc": "流程焦虑交给内搜，给确定性答案和该找的人",
+     "demo_say": "差旅报销流程怎么走？"},
     {"key": "ku_journal", "label": "情绪账本", "category": "onetool", "status": "planned",
      "desc": "打卡与寄存同步到你私人的如流知识库"},
     {"key": "card_to_peer", "label": "安心签送同事", "category": "onetool", "status": "planned",
      "desc": "把这张卡片发给一起加班的搭档"},
     # --- 自研减压仪式 ---
     {"key": "relax_tip", "label": "即时呼吸引导", "category": "ritual", "status": "live",
-     "desc": "4-7-8 呼吸 / 5-4-3-2-1 着地，此刻就能做"},
+     "desc": "4-7-8 呼吸 / 5-4-3-2-1 着地，此刻就能做",
+     "demo_say": "我现在特别紧张，心跳快得停不下来"},
     {"key": "counting_ritual", "label": "数息 · 数羊", "category": "ritual", "status": "live",
-     "desc": "给转个不停的脑子一件无聊的小事"},
+     "desc": "给转个不停的脑子一件无聊的小事",
+     "demo_say": "陪我数个数，让脑子停下来"},
     {"key": "comfort_card", "label": "安心签", "category": "ritual", "status": "live",
-     "desc": "对话收尾时，一句话做成可保存的卡片"},
+     "desc": "对话收尾时，一句话做成可保存的卡片",
+     "demo_say": "给我一张今天的安心签"},
     {"key": "encourage_me", "label": "夸夸我", "category": "ritual", "status": "live",
-     "desc": "基于你刚说的事实，具体地夸"},
+     "desc": "基于你刚说的事实，具体地夸",
+     "demo_say": "夸夸我，今天被需求虐惨了"},
     {"key": "destress_knowledge", "label": "减压小知识", "category": "ritual", "status": "live",
-     "desc": "压力为什么让胃疼？口语化科普"},
+     "desc": "压力为什么让胃疼？口语化科普",
+     "demo_say": "为什么一焦虑就胃疼？"},
     {"key": "reframe_thought", "label": "认知重构", "category": "ritual", "status": "demo",
-     "desc": "CBT 式苏格拉底提问，一次只问一个问题"},
+     "desc": "CBT 式苏格拉底提问，一次只问一个问题",
+     "demo_say": "来做一次认知重构吧，我总觉得这次评审要搞砸"},
     {"key": "worry_parking", "label": "烦恼寄存", "category": "ritual", "status": "planned",
      "desc": "把反刍的事存起来，到点再还给你"},
     {"key": "gratitude_moment", "label": "三件好事", "category": "ritual", "status": "planned",
@@ -68,13 +78,17 @@ SKILL_REGISTRY: list[dict[str, Any]] = [
      "desc": "外面正好在下雨，要不要听会儿真雨声？"},
     # --- 声音引擎 ---
     {"key": "play_asset", "label": "秒播曲库", "category": "sound", "status": "live",
-     "desc": "智能体自主匹配现成音频，即点即播"},
+     "desc": "智能体自主匹配现成音频，即点即播",
+     "demo_say": "来点雨声"},
     {"key": "generate_sleep_audio", "label": "实时生成", "category": "sound", "status": "live",
-     "desc": "故事 / 冥想 / ASMR / 纯音乐，现场为你制作"},
+     "desc": "故事 / 冥想 / ASMR / 纯音乐，现场为你制作",
+     "demo_say": "给我生成一段海边书店的故事，十五分钟"},
     {"key": "remix_current", "label": "实时混音", "category": "sound", "status": "live",
-     "desc": "给正在播的声音叠一层真实雨声"},
+     "desc": "给正在播的声音叠一层真实雨声",
+     "demo_say": "在现在的声音里加一点雨声"},
     {"key": "voice_call", "label": "全双工语音", "category": "sound", "status": "live",
-     "desc": "像打电话一样聊，可随时打断"},
+     "desc": "像打电话一样聊，可随时打断",
+     "demo_call": True},
 ]
 
 
@@ -87,7 +101,7 @@ def _base_response(
     reply: str,
     reasons: list[str],
     tool_calls: list[AgentToolCall],
-    skill_card: dict[str, Any],
+    skill_card: dict[str, Any] | None = None,
     latency_ms: int,
 ) -> AgentDecideResponse:
     return AgentDecideResponse(
@@ -106,6 +120,23 @@ def _base_response(
         selected_skill=selected_skill,
         tool_calls=tool_calls,
         skill_card=skill_card,
+    )
+
+
+def _reframe_dialog(normalized, profile_context) -> AgentDecideResponse:
+    started = time.perf_counter()
+    tool_calls = [
+        AgentToolCall(name="reframe_thought", status="succeeded",
+                      input={"mode": "socratic"}, output={"turn": 1},
+                      latency_ms=90, reason="CBT 是对话练习，不生成音频"),
+    ]
+    return _base_response(
+        normalized=normalized, profile_context=profile_context,
+        action="chat", selected_skill="reframe_thought",
+        reply="好，我们慢慢来。先说说最近哪个念头最缠人——说出它的原话，比如「我肯定搞砸」这种。我们一起看看它站不站得住。",
+        reasons=["用户想做认知重构练习", "以对话引导展开，一次只问一个问题"],
+        tool_calls=tool_calls,
+        latency_ms=int((time.perf_counter() - started) * 1000) + 120,
     )
 
 
@@ -227,7 +258,10 @@ def route_showcase_demo(request_text: str, *, repository, settings, normalizer) 
     neisou_topic = next((t for t in ("报销", "晋升") if t in compact), None)
     neisou = neisou_topic is not None and any(k in compact for k in ("流程", "怎么走", "怎么弄", "找谁", "怎么办", "截止", "材料"))
 
-    if not (weekly or okr or neisou):
+    cbt = ("cbt" in compact or "认知重构" in compact) and not any(
+        k in compact for k in ("音频", "生成", "听一段", "来一段"))
+
+    if not (weekly or okr or neisou or cbt):
         return None
 
     profile_context = build_profile_context(repository, settings, "showcase_user")
@@ -236,7 +270,9 @@ def route_showcase_demo(request_text: str, *, repository, settings, normalizer) 
         return _weekly_ghostwriter(normalized, profile_context)
     if okr:
         return _okr_reframe(normalized, profile_context)
-    return _neisou_answer(normalized, profile_context, neisou_topic)
+    if neisou:
+        return _neisou_answer(normalized, profile_context, neisou_topic)
+    return _reframe_dialog(normalized, profile_context)
 
 
 NUDGES: dict[str, dict[str, Any]] = {

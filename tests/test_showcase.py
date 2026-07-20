@@ -92,6 +92,16 @@ def test_showcase_okr_and_neisou_demo_routes(tmp_path, monkeypatch):
         assert ns["skill_card"]["owner"]
 
 
+def test_showcase_cbt_routes_to_dialog_not_audio(tmp_path, monkeypatch):
+    """'来进行一次CBT吧' must be a conversation, never an audio generation."""
+    _configure_tmp_app(monkeypatch, tmp_path)
+    with TestClient(app) as client:
+        data = client.post("/showcase/chat", json={"request_text": "来进行一次CBT吧。"}).json()
+        assert data["action"] == "chat"
+        assert data["selected_skill"] == "reframe_thought"
+        assert data["job_id"] is None
+
+
 def test_showcase_nudge_scenarios(tmp_path, monkeypatch):
     _configure_tmp_app(monkeypatch, tmp_path)
     with TestClient(app) as client:

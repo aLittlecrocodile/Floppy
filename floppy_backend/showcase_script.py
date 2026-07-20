@@ -39,6 +39,12 @@ const SKILL_LABELS = {
   okr_reframe: 'OKR 实据重构',
   neisou_answer: '内搜兜底',
   calendar_sense: '下会缓冲舱',
+  // chat-native dialog skills
+  relax_tip: '即时呼吸引导',
+  counting_ritual: '数息 · 数羊',
+  encourage_me: '夸夸我',
+  destress_knowledge: '减压小知识',
+  comfort_card: '安心签',
 };
 const INTENT_LABELS = { story: '放松故事', meditation: '冥想引导', asmr: 'ASMR', white_noise: '白噪音', music: '音乐', podcast_digest: '播客精华' };
 const PROGRESS_COPY = [
@@ -923,9 +929,11 @@ async function loadSkillMatrix() {
       grid.className = 'skill-grid';
       for (const s of items) {
         const chip = document.createElement('span');
-        chip.className = 'skill-chip';
+        chip.className = 'skill-chip clickable';
         chip.dataset.status = s.status;
-        chip.innerHTML = '<i></i>' + esc(s.label) + '<span class="tip">' + esc(s.desc) + '</span>';
+        const hint = s.status === 'planned' ? '（点击看规划）' : '（点击试试）';
+        chip.innerHTML = '<i></i>' + esc(s.label) + '<span class="tip">' + esc(s.desc + ' ' + hint) + '</span>';
+        chip.addEventListener('click', () => runSkillDemo(s));
         grid.appendChild(chip);
         skillChipByKey[s.key] = chip;
       }
@@ -943,6 +951,27 @@ function pulseSkill(key) {
   void chip.offsetWidth;  // restart animation
   chip.classList.add('active');
   setTimeout(() => chip.classList.remove('active'), 6000);
+}
+async function runSkillDemo(s) {
+  pulseSkill(s.key);
+  if (s.demo_call) { startRealtimeCall(); return; }
+  if (s.status === 'planned') { renderPlannedCard(s); return; }
+  if (s.demo_scenario) {
+    try {
+      const r = await fetch(appPath('/showcase/nudge?scenario=' + encodeURIComponent(s.demo_scenario)));
+      if (r.ok) showNudge(await r.json());
+    } catch { /* demo affordance */ }
+    return;
+  }
+  if (s.demo_say) sendText(s.demo_say);
+}
+function renderPlannedCard(s) {
+  const el = skillCardShell(s.label + ' · 规划中', 'ROADMAP');
+  el.querySelector('.sc-body').innerHTML =
+    '<div class="ns-answer">' + esc(s.desc) + '</div>' +
+    '<div class="sc-note">该技能已完成交互设计（hermes/skills 规范文件），等待对应后端 action 接入后点亮。</div>';
+  streamEl.appendChild(el);
+  streamEl.scrollTop = streamEl.scrollHeight;
 }
 
 /* ================= 厂内技能卡片 ================= */

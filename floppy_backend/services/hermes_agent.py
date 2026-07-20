@@ -419,7 +419,7 @@ class HermesAgentRuntime:
                 reply=decision.reply or "我在呢，想聊什么都可以。",
                 reasons=decision.reasons or ["Hermes 判断本轮为对话，无播放意图"],
                 planner_meta=planner_meta,
-                selected_skill="chat",
+                selected_skill=selected_skill,
                 tool_calls=[hermes_call],
             )
 
@@ -655,7 +655,15 @@ _HERMES_DECISION_INSTRUCTIONS = """
 - remix_current：用户想给 current_asset_id 对应的当前音频加/换/调背景音。必须存在 current_asset_id。
 - no_match：想听但既无合适资产也不能生成。reply 温柔致歉并给个替代建议。
 
-判断"想听"的信号：出现"听/放/来一段/讲个/生成/换一个"等词，或用户说想放空、想让脑子停下来、睡不着想要人陪。仅仅是倾诉情绪、问问题、打招呼时选 chat。
+chat 之下还有六个「对话技能」：命中时 action 仍为 chat，但把 selected_skill 填成对应技能名，reply 按该技能的方式来写：
+- reframe_thought：用户想做认知重构/CBT（"来一次CBT""帮我捋捋这个想法"），或表达灾难化/绝对化想法（"我肯定要被裁了""我什么都做不好"）。用苏格拉底式提问温柔引导，一次只问一个问题，不说教（例："最坏的情况，真的比其他可能都大吗？"）。**CBT 是对话练习，绝不因此生成音频**，除非用户明确说想"听"一段引导音频。用户表露自伤/危机信号时立即停止引导，转为直接关怀并提示求助渠道（如心理援助热线 400-161-9995），reasons 里加 "crisis"。
+- relax_tip：用户此刻焦虑紧绷（"现在很紧张""心跳好快""静不下来"）。reply 直接开始引导一段 4-7-8 呼吸或 5-4-3-2-1 感官着地：短句、多停顿（用"……"），一次只给一个动作指令，不罗列步骤。
+- counting_ritual：用户想数数/数息/数羊让脑子停下来。缓慢、重复、渐弱（"一……轻轻吸气……二……慢慢呼出去……"），一次 6-10 个数，不提问、不打扰。
+- encourage_me：用户求夸求安慰（"夸夸我""鼓励一下我"）。基于 TA 刚说的具体事实夸，最多三句，不空洞。
+- destress_knowledge：用户问压力/放松/睡眠的知识问题（"为什么一焦虑就胃疼"）。两三句口语化科普；涉及疾病诊断、用药一律建议就医，不装医生。
+- comfort_card：用户告别或对话自然收尾（"去忙了""晚安""给我一张安心签"）。reply 是一句为这次对话定制的安心话（结合 TA 今天说过的事），说完即止，不再追问。
+
+判断"想听"的信号：明确出现"听/放/来一段/讲个故事/生成音频/换一个"等词，或用户说想要声音陪伴入睡。注意：说"做/进行一次 CBT、认知重构、呼吸练习、数个数"是想要上面的对话技能，不是想听音频，选 chat 并填对应 selected_skill；仅仅倾诉情绪、问问题、打招呼时选 chat。
 
 匹配判断要点：
 - 以用户这句话的真实意图为准（内容类型、意象、时长、声音风格），profile 只是辅助偏好；结合对话上下文（比如上一轮你刚推荐过什么）。
@@ -676,7 +684,7 @@ _HERMES_DECISION_INSTRUCTIONS = """
 只输出一个 JSON 对象，不要 Markdown，不要解释。格式：
 {
   "action": "chat|play_asset|generate_job|remix_current|no_match",
-  "selected_skill": "chat|play_asset|generate_sleep_audio|remix_current|no_match",
+  "selected_skill": "chat|reframe_thought|relax_tip|counting_ritual|encourage_me|destress_knowledge|comfort_card|play_asset|generate_sleep_audio|remix_current|no_match",
   "asset_id": null,
   "remix_sound_type": null,
   "directive": null,

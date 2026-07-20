@@ -443,6 +443,9 @@ SHOWCASE_HTML = r"""<!doctype html>
   .skill-chip[data-status="planned"] { opacity: .5; }
   .skill-chip[data-status="planned"] i { background: none; border: 1px solid var(--text-faint); }
   .skill-chip:hover { border-color: var(--panel-border-lit); color: var(--text); opacity: 1; }
+  .skill-chip.clickable { cursor: pointer; }
+  .skill-chip.clickable:hover { transform: translateY(-1px); background: #fff; }
+  .skill-chip.clickable:active { transform: translateY(0); }
   .skill-chip.active {
     color: var(--accent-deep); border-color: rgba(214,90,71,.6); background: #fff2ec;
     box-shadow: 0 0 0 5px rgba(214,90,71,.12);
