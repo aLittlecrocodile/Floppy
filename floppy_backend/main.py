@@ -62,6 +62,7 @@ from floppy_backend.services.library import LibraryService
 from floppy_backend.services.normalizer import RequestNormalizer
 from floppy_backend.services.profile import ProfileService
 from floppy_backend.services.remix import RemixService
+from floppy_backend.services.weather import WeatherService
 from floppy_backend.services.script import SleepScriptService
 from floppy_backend.storage import LocalFileStorage, set_request_base_url
 from floppy_backend.logging_setup import AccessLogMiddleware, setup_logging
@@ -93,6 +94,7 @@ class AppState:
     agent_runtime: HermesAgentRuntime
     settings: Settings
     normalizer: RequestNormalizer
+    weather: WeatherService
 
 
 state = AppState()
@@ -150,6 +152,7 @@ async def lifespan(app: FastAPI):
     state.remix_service = RemixService(repository, storage)
     state.settings = settings
     state.normalizer = state.generation_service.normalizer
+    state.weather = WeatherService()
     state.agent_runtime = HermesAgentRuntime(
         repository=repository,
         storage=storage,
@@ -159,6 +162,7 @@ async def lifespan(app: FastAPI):
         library=library,
         settings=settings,
         directive_planner=directive_planner,
+        weather=state.weather,
     )
     # Seed the catalog once at startup (idempotent) so voice/demo requests
     # don't pay the ~60s seeding cost on their first call.
@@ -168,6 +172,15 @@ async def lifespan(app: FastAPI):
         pass
     # 预热兜底播报语音（固定文案），之后所有播报零延迟命中文件缓存
     _reply_tts_executor.submit(_notify_audio_url)
+
+    def _warm_demo_replies() -> None:
+        for line in showcase_skills.DEMO_SPOKEN_LINES:
+            try:
+                _reply_audio_url(line)
+            except Exception:  # noqa: BLE001 — prewarm is best-effort
+                pass
+
+    _reply_tts_executor.submit(_warm_demo_replies)
     yield
     conn.close()
 
@@ -624,6 +637,8 @@ def showcase_chat(payload: dict, background_tasks: BackgroundTasks):
         normalizer=state.normalizer,
     )
     if demo is not None:
+        if demo.reply:
+            demo.reply_audio_url = _reply_audio_url(demo.reply)
         return demo
     req = AgentDecideRequest(
         user_id=SHOWCASE_USER_ID,
@@ -631,7 +646,10 @@ def showcase_chat(payload: dict, background_tasks: BackgroundTasks):
         generation_allowed=True,
         current_asset_id=current_asset_id,
     )
-    return _run_agent_decide(req, background_tasks)
+    response = _run_agent_decide(req, background_tasks)
+    if response.reply:
+        response.reply_audio_url = _reply_audio_url(response.reply)
+    return response
 
 
 @app.get("/showcase/skills")

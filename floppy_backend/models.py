@@ -295,8 +295,13 @@ class AgentDecideResponse(BaseModel):
     selected_skill: str | None = None
     tool_calls: list[AgentToolCall] = Field(default_factory=list)
     # Structured payload for frontend skill cards (weekly draft, OKR progress,
-    # neisou answer, ...). None for plain decisions.
+    # neisou answer, ritual receipts ...). None for plain decisions.
     skill_card: dict[str, Any] | None = None
+    # Spoken reply (MiniMax TTS, cached by text) — frontend auto-plays when on.
+    reply_audio_url: str | None = None
+    # sleep_timer: executed by the frontend player (countdown + volume fade).
+    timer_sec: int | None = None
+    fade_out: bool | None = None
 
 
 # --- P0: Questionnaire ---

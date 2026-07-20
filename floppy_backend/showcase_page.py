@@ -549,6 +549,16 @@ SHOWCASE_HTML = r"""<!doctype html>
     margin-top: 12px; padding: 9px 12px; border-radius: 10px; font-size: 12px;
     color: var(--accent-deep); background: var(--accent-soft); line-height: 1.7;
   }
+  /* ritual receipt */
+  .rr-title { font-family: var(--serif); font-size: 15px; font-weight: 600; margin-bottom: 8px; }
+  .rr-line { font-size: 12.5px; color: var(--text-dim); line-height: 1.9; }
+  .rr-stamp {
+    display: inline-flex; align-items: center; gap: 6px; margin-top: 11px;
+    font-size: 11px; color: var(--moss); font-weight: 600;
+    padding: 4px 11px; border-radius: 999px;
+    background: rgba(63,124,89,.08); border: 1px solid rgba(63,124,89,.25);
+  }
+  .pill-btn.muted { opacity: .55; }
   /* neisou */
   .ns-answer { font-size: 13px; line-height: 1.8; }
   .ns-meta { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 11px; }
@@ -752,6 +762,7 @@ SHOWCASE_HTML = r"""<!doctype html>
     <div class="tagline">让各位同学，压力小一点</div>
     <div class="header-actions">
       <div class="health"><span class="dot" id="healthDot"></span><span id="healthText">检测服务状态…</span></div>
+      <button class="pill-btn" id="speakBtn" type="button" title="回复是否开口说话"><span class="symbol" aria-hidden="true">🔊</span><span>开口说话</span></button>
       <button class="pill-btn" id="breatheBtn" type="button"><span class="breath-dot" aria-hidden="true"></span><span>呼吸 60 秒</span></button>
       <div class="director">
         <button class="pill-btn" id="directorBtn" type="button"><span class="symbol" aria-hidden="true">🎬</span><span>情境演示</span></button>

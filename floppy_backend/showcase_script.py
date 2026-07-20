@@ -216,6 +216,8 @@ function handleDecision(data, bubble) {
 
   pulseSkill((data.skill_card && data.skill_card.skill) || data.selected_skill || data.action);
   if (data.skill_card) renderSkillCard(data);
+  speakReply(data.reply_audio_url);
+  if (data.timer_sec) armSleepTimer(data.timer_sec, data.fade_out !== false);
 
   const tool = execTool(data);
 
@@ -359,6 +361,7 @@ function pollRemix(jobId) {
 /* ---------- now playing ---------- */
 function playAudio(url, title, sub, assetId) {
   if (!url) return;
+  if (typeof clearSleepTimer === 'function') clearSleepTimer(true);
   currentAssetId = assetId || null;
   npTitle.textContent = '《' + (title || '未命名') + '》';
   npSub.textContent = sub || '';
@@ -1013,6 +1016,11 @@ function renderSkillCard(data) {
       }, 150));
     }
     if (card.insight) body.insertAdjacentHTML('beforeend', '<div class="okr-insight">' + esc(card.insight) + '</div>');
+  } else if (card.type === 'ritual_receipt') {
+    el = skillCardShell(card.title || '已记录', 'RITUAL');
+    el.querySelector('.sc-body').innerHTML =
+      (card.lines || []).map((l) => '<div class="rr-line">' + esc(l) + '</div>').join('') +
+      (card.stamp ? '<span class="rr-stamp">✓ ' + esc(card.stamp) + '</span>' : '');
   } else if (card.type === 'neisou_answer') {
     el = skillCardShell('内搜 · 确定性答案', 'NEISOU');
     el.querySelector('.sc-body').innerHTML =
@@ -1077,4 +1085,55 @@ nudgeAction.addEventListener('click', () => {
   else if (cfg.action === 'send' && cfg.action_text) sendText(cfg.action_text);
 });
 nudgeDismiss.addEventListener('click', () => { nudgeEl.hidden = true; });
+
+/* ================= 开口说话（回复 TTS） ================= */
+const speakBtn = $('speakBtn');
+let speakOn = localStorage.getItem('unwind_speak') !== 'off';
+function renderSpeakBtn() {
+  speakBtn.classList.toggle('muted', !speakOn);
+  speakBtn.querySelector('.symbol').textContent = speakOn ? '🔊' : '🔇';
+}
+renderSpeakBtn();
+speakBtn.addEventListener('click', () => {
+  speakOn = !speakOn;
+  localStorage.setItem('unwind_speak', speakOn ? 'on' : 'off');
+  if (!speakOn) { try { ttsPlayer.pause(); } catch {} }
+  renderSpeakBtn();
+});
+function speakReply(url) {
+  if (!speakOn || !url) return;
+  try {
+    ttsPlayer.onended = null;
+    ttsPlayer.src = url;
+    ttsPlayer.play().catch(() => { /* autoplay blocked until first gesture */ });
+  } catch { /* voice is an enhancement */ }
+}
+
+/* ================= 定时渐弱（播放器本地执行） ================= */
+let sleepTimerHandle = null, sleepTimerEnd = 0, baseSub = '';
+function clearSleepTimer(restoreVolume) {
+  if (sleepTimerHandle) { clearInterval(sleepTimerHandle); sleepTimerHandle = null; }
+  if (restoreVolume) player.volume = 1;
+}
+function armSleepTimer(sec, fade) {
+  clearSleepTimer(true);
+  sleepTimerEnd = Date.now() + sec * 1000;
+  baseSub = npSub.textContent || '';
+  addMsg('system', '⏱ ' + Math.round(sec / 60) + ' 分钟后' + (fade ? '声音渐弱停止' : '自动停止'));
+  const FADE_WINDOW = Math.min(30, sec / 3);
+  sleepTimerHandle = setInterval(() => {
+    const left = (sleepTimerEnd - Date.now()) / 1000;
+    if (left <= 0) {
+      clearSleepTimer(false);
+      player.pause(); player.volume = 1;
+      npSub.textContent = baseSub;
+      nowbar.classList.remove('show');
+      return;
+    }
+    if (fade && left <= FADE_WINDOW) player.volume = Math.max(0.02, left / FADE_WINDOW);
+    const mm = String(Math.floor(left / 60)).padStart(2, '0');
+    const ss = String(Math.floor(left % 60)).padStart(2, '0');
+    npSub.textContent = baseSub + ' · ⏱ ' + mm + ':' + ss;
+  }, 1000);
+}
 """

@@ -31,6 +31,14 @@ from floppy_backend.models import (
     ProfileContext,
 )
 
+# Fixed demo replies — prewarmed into the reply-TTS cache at startup so the
+# first click on a skill chip speaks instantly on stage.
+REPLY_REFRAME = "好，我们慢慢来。先说说最近哪个念头最缠人——说出它的原话，比如「我肯定搞砸」这种。我们一起看看它站不站得住。"
+REPLY_WEEKLY = "周报我帮你理好草稿了——你过目改两句就能交。写周报这件事，今晚不配占用你的力气。"
+REPLY_OKR = "先看一眼数据再下结论：KR1 已经 90%，KR2 也过了 70%。「肯定完不成」这个判断，好像和你的进度条对不上——最让你没底的是 KR3 吧？"
+
+DEMO_SPOKEN_LINES: list[str] = [REPLY_REFRAME, REPLY_WEEKLY, REPLY_OKR]
+
 SKILL_REGISTRY: list[dict[str, Any]] = [
     # --- OneTool 厂内能力 ---
     {"key": "calendar_sense", "label": "下会缓冲舱", "category": "onetool", "status": "demo",
@@ -68,14 +76,21 @@ SKILL_REGISTRY: list[dict[str, Any]] = [
     {"key": "reframe_thought", "label": "认知重构", "category": "ritual", "status": "demo",
      "desc": "CBT 式苏格拉底提问，一次只问一个问题",
      "demo_say": "来做一次认知重构吧，我总觉得这次评审要搞砸"},
-    {"key": "worry_parking", "label": "烦恼寄存", "category": "ritual", "status": "planned",
-     "desc": "把反刍的事存起来，到点再还给你"},
-    {"key": "gratitude_moment", "label": "三件好事", "category": "ritual", "status": "planned",
-     "desc": "糟糕的一天里也藏着小确幸"},
-    {"key": "mood_checkin", "label": "心情打卡", "category": "ritual", "status": "planned",
-     "desc": "1 到 10 分，一句话完成"},
-    {"key": "weather_brief", "label": "天气速报", "category": "ritual", "status": "planned",
-     "desc": "外面正好在下雨，要不要听会儿真雨声？"},
+    {"key": "worry_parking", "label": "烦恼寄存", "category": "ritual", "status": "live",
+     "desc": "把反刍的事存起来，真实落库，下次回访",
+     "demo_say": "明天早上的汇报，我越想越慌"},
+    {"key": "gratitude_moment", "label": "三件好事", "category": "ritual", "status": "live",
+     "desc": "小确幸真实记下，一周后还能回放",
+     "demo_say": "今天也有好事：同事帮我顶了个会，晚饭的面很好吃"},
+    {"key": "mood_checkin", "label": "心情打卡", "category": "ritual", "status": "live",
+     "desc": "1 到 10 分，真实写入画像与打卡记录",
+     "demo_say": "今天心情大概 6 分吧"},
+    {"key": "weather_brief", "label": "天气速报", "category": "ritual", "status": "live",
+     "desc": "真实天气（Open-Meteo）注入对话上下文",
+     "demo_say": "明天要不要带伞？"},
+    {"key": "update_preference", "label": "偏好速记", "category": "ritual", "status": "live",
+     "desc": "「以后别放男声」说一次，写进画像",
+     "demo_say": "以后别给我放雷声了"},
     # --- 声音引擎 ---
     {"key": "play_asset", "label": "秒播曲库", "category": "sound", "status": "live",
      "desc": "智能体自主匹配现成音频，即点即播",
@@ -89,6 +104,9 @@ SKILL_REGISTRY: list[dict[str, Any]] = [
     {"key": "voice_call", "label": "全双工语音", "category": "sound", "status": "live",
      "desc": "像打电话一样聊，可随时打断",
      "demo_call": True},
+    {"key": "sleep_timer", "label": "定时渐弱", "category": "sound", "status": "live",
+     "desc": "到点声音慢慢淡出，播放器本地执行",
+     "demo_say": "播 20 分钟就停，声音慢慢变小"},
 ]
 
 
@@ -133,7 +151,7 @@ def _reframe_dialog(normalized, profile_context) -> AgentDecideResponse:
     return _base_response(
         normalized=normalized, profile_context=profile_context,
         action="chat", selected_skill="reframe_thought",
-        reply="好，我们慢慢来。先说说最近哪个念头最缠人——说出它的原话，比如「我肯定搞砸」这种。我们一起看看它站不站得住。",
+        reply=REPLY_REFRAME,
         reasons=["用户想做认知重构练习", "以对话引导展开，一次只问一个问题"],
         tool_calls=tool_calls,
         latency_ms=int((time.perf_counter() - started) * 1000) + 120,
@@ -163,7 +181,7 @@ def _weekly_ghostwriter(normalized, profile_context) -> AgentDecideResponse:
     return _base_response(
         normalized=normalized, profile_context=profile_context,
         action="chat", selected_skill="weekly_ghostwriter",
-        reply="周报我帮你理好草稿了——你过目改两句就能交。写周报这件事，今晚不配占用你的力气。",
+        reply=REPLY_WEEKLY,
         reasons=["检测到周报焦虑，启动周报代写", "草稿基于本周真实工作痕迹汇总"],
         tool_calls=tool_calls,
         skill_card={"skill": "weekly_ghostwriter", "type": "weekly_draft",
@@ -188,7 +206,7 @@ def _okr_reframe(normalized, profile_context) -> AgentDecideResponse:
     return _base_response(
         normalized=normalized, profile_context=profile_context,
         action="chat", selected_skill="okr_reframe",
-        reply="先看一眼数据再下结论：KR1 已经 90%，KR2 也过了 70%。「肯定完不成」这个判断，好像和你的进度条对不上——最让你没底的是 KR3 吧？",
+        reply=REPLY_OKR,
         reasons=["用户对 OKR 出现灾难化判断", "调取真实 KR 进度作为重构依据"],
         tool_calls=tool_calls,
         skill_card={"skill": "okr_reframe", "type": "okr_progress",

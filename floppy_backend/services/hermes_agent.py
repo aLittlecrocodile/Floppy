@@ -22,7 +22,9 @@ from floppy_backend.models import (
     GenerationRequest,
     NormalizedAudioRequest,
     PlannerMeta,
+    ProfileCheckinIn,
     ProfileContext,
+    UserProfileIn,
 )
 from floppy_backend.repositories import Repository
 from floppy_backend.services.generation import GenerationService
@@ -32,7 +34,12 @@ from floppy_backend.services.remix import RemixService
 from floppy_backend.storage import LocalFileStorage
 
 
-_ACTIONS = {"chat", "play_asset", "generate_job", "remix_current", "no_match"}
+_ACTIONS = {
+    "chat", "play_asset", "generate_job", "remix_current", "no_match",
+    # ritual actions — executed locally, surfaced to clients as action="chat"
+    "mood_checkin", "worry_parking", "gratitude_moment", "update_preference", "sleep_timer",
+}
+_RITUAL_ACTIONS = {"mood_checkin", "worry_parking", "gratitude_moment", "update_preference", "sleep_timer"}
 _ACTION_ALIASES = {
     "generate_sleep_audio": "generate_job",
     "play_audio_asset": "play_asset",
@@ -73,6 +80,13 @@ class HermesDecision(BaseModel):
     reply: str | None = None  # user-facing sentence, present on every action
     reasons: list[str] = Field(default_factory=list)
     confidence: float = Field(default=0.7, ge=0.0, le=1.0)
+    # ritual-action payloads
+    mood_score: int | None = Field(default=None, ge=1, le=10)
+    worry_text: str | None = None
+    gratitude_items: list[str] = Field(default_factory=list)
+    profile_patch: dict[str, Any] | None = None
+    timer_sec: int | None = Field(default=None, ge=60, le=7200)
+    fade_out: bool = True
 
     def normalized_action(self) -> str:
         action = _ACTION_ALIASES.get(self.action, self.action)
@@ -83,13 +97,14 @@ class HermesDecision(BaseModel):
     def skill_name(self) -> str:
         if self.selected_skill:
             return self.selected_skill
+        action = self.normalized_action()
         return {
             "chat": "chat",
             "play_asset": "play_asset",
             "generate_job": "generate_sleep_audio",
             "remix_current": "remix_current",
             "no_match": "no_match",
-        }[self.normalized_action()]
+        }.get(action, action)
 
 
 class HermesAgentClient:
@@ -115,8 +130,9 @@ class HermesAgentClient:
         request: AgentDecideRequest,
         profile_context: ProfileContext,
         candidates: list[AudioAsset],
+        extras: dict[str, Any] | None = None,
     ) -> HermesDecision:
-        prompt = _build_decision_prompt(request, profile_context, candidates)
+        prompt = _build_decision_prompt(request, profile_context, candidates, extras)
         headers = {
             "Content-Type": "application/json",
             "X-Hermes-Session-Id": f"floppy-agent:{request.user_id}",
@@ -191,6 +207,7 @@ class HermesAgentRuntime:
         library: LibraryService,
         settings: Settings,
         directive_planner=None,
+        weather=None,
     ):
         self._repo = repository
         self._storage = storage
@@ -200,6 +217,7 @@ class HermesAgentRuntime:
         self._library = library
         self._settings = settings
         self._directive_planner = directive_planner
+        self._weather = weather
         self._client = HermesAgentClient(settings)
 
     def run(self, request: AgentDecideRequest) -> AgentDecideResponse:
@@ -226,11 +244,15 @@ class HermesAgentRuntime:
             return self._exact_cache_response(request, profile_context, normalized, exact)
 
         candidates = self._catalog_candidates()
+        extras = self._decision_extras(request.user_id)
         decision = None
         last_exc: Exception | None = None
         for _ in range(2):  # one retry — Hermes/LLM cold-start hiccups are transient
             try:
-                decision = self._client.decide(request=request, profile_context=profile_context, candidates=candidates)
+                decision = self._client.decide(
+                    request=request, profile_context=profile_context,
+                    candidates=candidates, extras=extras,
+                )
                 break
             except Exception as exc:  # noqa: BLE001 — network/parse/validation errors from Hermes
                 last_exc = exc
@@ -272,6 +294,152 @@ class HermesAgentRuntime:
             return self._storage.existing_path_for(asset.object_key).exists()
         except (ValueError, OSError):
             return False
+
+    def _decision_extras(self, user_id: str) -> dict[str, Any]:
+        """Real-world context injected into the decision prompt: weather,
+        recent ritual events, and 7-day listening stats. Each part is
+        best-effort — failures degrade to absence, never block a turn."""
+        extras: dict[str, Any] = {}
+        try:
+            if self._weather is not None and self._settings.weather_city:
+                snap = self._weather.snapshot(self._settings.weather_city)
+                if snap:
+                    extras["weather"] = snap
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            rituals = self._repo.recent_events(
+                user_id, ["worry_parked", "gratitude", "mood_checkin"], limit=6
+            )
+            if rituals:
+                extras["recent_rituals"] = rituals
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            records = self._repo.list_playback_history(user_id, limit=50)
+            week_ago = time.time() - 7 * 86400
+            recent = [r for r in records if r.started_at.timestamp() > week_ago]
+            if recent:
+                extras["listen_stats"] = {
+                    "plays_7d": len(recent),
+                    "days_7d": len({r.started_at.date().isoformat() for r in recent}),
+                    "recent_titles": [r.title for r in recent[:3] if r.title],
+                }
+        except Exception:  # noqa: BLE001
+            pass
+        return extras
+
+    def _execute_ritual(
+        self,
+        *,
+        action: str,
+        request: AgentDecideRequest,
+        profile_context: ProfileContext,
+        normalized: NormalizedAudioRequest,
+        candidates: list[AudioAsset],
+        decision: HermesDecision,
+        planner_meta: PlannerMeta,
+        hermes_call: AgentToolCall,
+    ) -> AgentDecideResponse:
+        """Execute a ritual action for real (events / profile writes), then
+        answer as a chat turn (stable client contract) with a receipt card."""
+        started = time.perf_counter()
+        skill = action
+        card_lines: list[str] = []
+        card_title = ""
+        tool_input: dict[str, Any] = {}
+        tool_output: dict[str, Any] = {}
+        timer_sec = None
+        fade_out = None
+
+        if action == "mood_checkin":
+            score = decision.mood_score or 5
+            self._repo.update_profile_checkin(
+                request.user_id, ProfileCheckinIn(tonight_mood=f"{score}/10")
+            )
+            self._repo.record_event(
+                request.user_id, EventIn(event_type="mood_checkin", payload={"score": score})
+            )
+            total = len(self._repo.recent_events(request.user_id, ["mood_checkin"], limit=200))
+            card_title = "心情打卡"
+            card_lines = [f"今天 {score} / 10 分", f"这是我们一起记下的第 {total} 次"]
+            tool_input, tool_output = {"score": score}, {"total_checkins": total}
+        elif action == "worry_parking":
+            text = (decision.worry_text or request.request_text).strip()[:120]
+            self._repo.record_event(
+                request.user_id, EventIn(event_type="worry_parked", payload={"text": text})
+            )
+            card_title = "烦恼寄存"
+            card_lines = [f"「{text}」", "已由 Unwind 保管，到点再还给你"]
+            tool_input, tool_output = {"text": text}, {"parked": True}
+        elif action == "gratitude_moment":
+            items = [i.strip()[:80] for i in decision.gratitude_items if i.strip()][:3]
+            if not items:
+                items = [request.request_text.strip()[:80]]
+            self._repo.record_event(
+                request.user_id, EventIn(event_type="gratitude", payload={"items": items})
+            )
+            card_title = "今日三件好事"
+            card_lines = [f"· {item}" for item in items]
+            tool_input, tool_output = {"items": items}, {"count": len(items)}
+        elif action == "update_preference":
+            patch = _whitelist_profile_patch(decision.profile_patch or {})
+            if patch:
+                profile = self._repo.get_profile(request.user_id)
+                merged = profile.model_dump()
+                for key, value in patch.items():
+                    if isinstance(merged.get(key), list) and isinstance(value, list):
+                        merged[key] = list(dict.fromkeys([*merged[key], *value]))
+                    else:
+                        merged[key] = value
+                profile_in = UserProfileIn(**{k: merged[k] for k in UserProfileIn.model_fields})
+                self._repo.upsert_profile(request.user_id, profile_in, profile.segment)
+                profile_context = self._profile_context(request.user_id)
+            self._repo.record_event(
+                request.user_id, EventIn(event_type="preference_updated", payload={"patch": patch})
+            )
+            card_title = "偏好已更新"
+            card_lines = [f"{k}：{v}" for k, v in patch.items()] or ["本次没有可更新的白名单字段"]
+            tool_input, tool_output = {"patch": decision.profile_patch}, {"applied": patch}
+        elif action == "sleep_timer":
+            timer_sec = decision.timer_sec or 1200
+            fade_out = decision.fade_out
+            self._repo.record_event(
+                request.user_id,
+                EventIn(event_type="sleep_timer", asset_id=request.current_asset_id,
+                        payload={"timer_sec": timer_sec, "fade_out": fade_out}),
+            )
+            card_title = "定时渐弱"
+            card_lines = [f"{timer_sec // 60} 分钟后声音慢慢淡出", "由播放器本地执行，不打扰你"]
+            tool_input = {"timer_sec": timer_sec, "fade_out": fade_out}
+            tool_output = {"armed": request.current_asset_id is not None}
+
+        return AgentDecideResponse(
+            action="chat",
+            normalized_request=normalized,
+            profile_context=profile_context,
+            search=self._search_view(candidates),
+            asset=None,
+            reply=decision.reply,
+            reasons=decision.reasons or [f"执行仪式技能 {skill}"],
+            planner_meta=planner_meta,
+            selected_skill=skill,
+            timer_sec=timer_sec,
+            fade_out=fade_out,
+            skill_card={
+                "skill": skill, "type": "ritual_receipt",
+                "title": card_title, "lines": card_lines,
+                "stamp": "已写入本地记录",
+            },
+            tool_calls=[
+                hermes_call,
+                AgentToolCall(
+                    name=skill, status="succeeded",
+                    input=tool_input, output=tool_output,
+                    latency_ms=int((time.perf_counter() - started) * 1000),
+                ),
+            ],
+        )
 
     def _search_view(
         self,
@@ -409,6 +577,13 @@ class HermesAgentRuntime:
                 hermes_call.output["action"] = action
                 hermes_call.output["selected_skill"] = selected_skill
 
+        if action in _RITUAL_ACTIONS:
+            return self._execute_ritual(
+                action=action, request=request, profile_context=profile_context,
+                normalized=normalized, candidates=candidates, decision=decision,
+                planner_meta=planner_meta, hermes_call=hermes_call,
+            )
+
         if action == "chat":
             return AgentDecideResponse(
                 action="chat",
@@ -543,6 +718,26 @@ class HermesAgentRuntime:
         )
 
 
+_PROFILE_PATCH_WHITELIST = {"voice_preferences", "background_preferences", "mood_tags", "duration_preference_min"}
+
+
+def _whitelist_profile_patch(patch: dict[str, Any]) -> dict[str, Any]:
+    out: dict[str, Any] = {}
+    for key, value in patch.items():
+        if key not in _PROFILE_PATCH_WHITELIST:
+            continue
+        if key == "duration_preference_min":
+            try:
+                out[key] = max(5, min(60, int(value)))
+            except (TypeError, ValueError):
+                continue
+        elif isinstance(value, list):
+            out[key] = [str(v)[:40] for v in value][:8]
+        elif isinstance(value, str):
+            out[key] = [value[:40]]
+    return out
+
+
 def _select_asset(candidates: list[AudioAsset], asset_id: str | None) -> AudioAsset | None:
     """Strict lookup: the agent's asset_id must reference a real catalog asset.
     No silent fallback to the first candidate — a wrong asset played to a user
@@ -621,6 +816,7 @@ def _build_decision_prompt(
     request: AgentDecideRequest,
     profile_context: ProfileContext,
     candidates: list[AudioAsset],
+    extras: dict[str, Any] | None = None,
 ) -> str:
     catalog = [
         {
@@ -638,6 +834,8 @@ def _build_decision_prompt(
         "profile": profile_context.model_dump(mode="json"),
         "catalog": catalog,
     }
+    if extras:
+        context.update(extras)
     return json.dumps(context, ensure_ascii=False)
 
 
@@ -654,6 +852,11 @@ _HERMES_DECISION_INSTRUCTIONS = """
 - generate_job：想听的内容 catalog 里确实没有同类或相近的（把 catalog 从头到尾看完再下结论），才现场生成（generation_allowed=false 时禁止）。意象完全无关的不要硬凑——想听火车声不要拿雨声顶。reply 要告知正在专门为 TA 制作，需要等一小会儿。
 - remix_current：用户想给 current_asset_id 对应的当前音频加/换/调背景音。必须存在 current_asset_id。
 - no_match：想听但既无合适资产也不能生成。reply 温柔致歉并给个替代建议。
+- mood_checkin：用户给今天心情打分（"今天大概 6 分吧"），或你问完分数 TA 回答了。填 mood_score(1-10)。reply 温柔接住这个分数。
+- worry_parking：用户在反刍一件未来的具体担心（"明天的汇报怎么办"），需要放下而不是解决方案。填 worry_text（用 TA 的原话概括成短语）。reply 告诉 TA 这件事由你保管，到点再还。
+- gratitude_moment：用户说出今天的小确幸（可能是你邀请后回答的）。填 gratitude_items（1-3 条原话短语）。reply 温柔复述并收下。
+- update_preference：用户表达长期偏好（"以后别放男声""我不喜欢雷声"）。填 profile_patch，白名单字段：voice_preferences / background_preferences / mood_tags / duration_preference_min（列表字段填要追加的项）。reply 自然确认（"记住了，以后不放雷声"）。仅"今晚/这次"的一次性要求不算。
+- sleep_timer：用户要定时停止/渐弱（"播 20 分钟就停"）。填 timer_sec（秒）和 fade_out。需要有 current_asset_id 或本轮正在安排播放。reply 确认（"好，20 分钟后声音会慢慢淡下去"）。
 
 chat 之下还有六个「对话技能」：命中时 action 仍为 chat，但把 selected_skill 填成对应技能名，reply 按该技能的方式来写：
 - reframe_thought：用户想做认知重构/CBT（"来一次CBT""帮我捋捋这个想法"），或表达灾难化/绝对化想法（"我肯定要被裁了""我什么都做不好"）。用苏格拉底式提问温柔引导，一次只问一个问题，不说教（例："最坏的情况，真的比其他可能都大吗？"）。**CBT 是对话练习，绝不因此生成音频**，除非用户明确说想"听"一段引导音频。用户表露自伤/危机信号时立即停止引导，转为直接关怀并提示求助渠道（如心理援助热线 400-161-9995），reasons 里加 "crisis"。
@@ -664,6 +867,11 @@ chat 之下还有六个「对话技能」：命中时 action 仍为 chat，但�
 - comfort_card：用户告别或对话自然收尾（"去忙了""晚安""给我一张安心签"）。reply 是一句为这次对话定制的安心话（结合 TA 今天说过的事），说完即止，不再追问。
 
 判断"想听"的信号：明确出现"听/放/来一段/讲个故事/生成音频/换一个"等词，或用户说想要声音陪伴入睡。注意：说"做/进行一次 CBT、认知重构、呼吸练习、数个数"是想要上面的对话技能，不是想听音频，选 chat 并填对应 selected_skill；仅仅倾诉情绪、问问题、打招呼时选 chat。
+
+上下文数据（context 里可能出现，主动善用）：
+- weather：所在城市实时/明日天气。用户问天气直接据此回答；外面正在下雨时可顺势提议听真雨声。没有该字段就说暂时不知道，不要编造。
+- recent_rituals：最近的烦恼寄存/三件好事/心情打卡记录。上次寄存的烦恼可以轻轻回访一次（"上次那件事还压着你吗？"）；不要重复推销打卡。
+- listen_stats：近 7 天收听统计。用户问"我最近听了什么"据此回答，语气是陪伴不是报表。
 
 匹配判断要点：
 - 以用户这句话的真实意图为准（内容类型、意象、时长、声音风格），profile 只是辅助偏好；结合对话上下文（比如上一轮你刚推荐过什么）。
@@ -683,11 +891,17 @@ chat 之下还有六个「对话技能」：命中时 action 仍为 chat，但�
 
 只输出一个 JSON 对象，不要 Markdown，不要解释。格式：
 {
-  "action": "chat|play_asset|generate_job|remix_current|no_match",
+  "action": "chat|play_asset|generate_job|remix_current|no_match|mood_checkin|worry_parking|gratitude_moment|update_preference|sleep_timer",
   "selected_skill": "chat|reframe_thought|relax_tip|counting_ritual|encourage_me|destress_knowledge|comfort_card|play_asset|generate_sleep_audio|remix_current|no_match",
   "asset_id": null,
   "remix_sound_type": null,
   "directive": null,
+  "mood_score": null,
+  "worry_text": null,
+  "gratitude_items": [],
+  "profile_patch": null,
+  "timer_sec": null,
+  "fade_out": true,
   "reply": "给用户看的一句话",
   "reasons": ["简短中文原因"],
   "confidence": 0.0

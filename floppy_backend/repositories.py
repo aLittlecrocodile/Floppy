@@ -711,6 +711,28 @@ class Repository:
             )
             self.conn.commit()
 
+    def recent_events(self, user_id: str, event_types: list[str], limit: int = 10) -> list[dict]:
+        """Most-recent events of the given types — feeds ritual context into
+        the agent decision prompt (parked worries, gratitude, mood checkins)."""
+        if not event_types:
+            return []
+        placeholders = ",".join("?" for _ in event_types)
+        with self._lock:
+            rows = self.conn.execute(
+                f"SELECT event_type, payload, created_at FROM events "
+                f"WHERE user_id = ? AND event_type IN ({placeholders}) "
+                f"ORDER BY created_at DESC LIMIT ?",
+                (user_id, *event_types, limit),
+            ).fetchall()
+        out = []
+        for r in rows:
+            try:
+                payload = loads(r["payload"])
+            except (TypeError, ValueError):
+                payload = {}
+            out.append({"event_type": r["event_type"], "payload": payload, "created_at": r["created_at"]})
+        return out
+
     def list_playback_history(self, user_id: str, limit: int = 50) -> list[PlaybackRecord]:
         with self._lock:
             rows = self.conn.execute(

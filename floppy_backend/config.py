@@ -55,6 +55,8 @@ class Settings(BaseSettings):
     # Completions. The local OneAPI gateway currently supports chat only.
     hermes_api_style: str = "responses"  # "responses" | "chat"
     hermes_timeout_sec: float = 30.0
+    # City for the real-weather decision context (Open-Meteo, no key needed).
+    weather_city: str = "北京"
     hermes_store_conversation: bool = True
     # Max catalog assets shown to Hermes per decision (curated first, newest
     # first). Must comfortably exceed the curated pool size (currently 64) —
