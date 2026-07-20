@@ -154,7 +154,7 @@ async function sendText(text) {
   sendBtn.disabled = true;
   addMsg('user', esc(text));
   tlReset();
-  const thinking = addMsg('assistant', '<span class="shimmer">墨息正在思考…</span>');
+  const thinking = addMsg('assistant', '<span class="shimmer">Unwind 正在思考…</span>');
   try {
     const r = await fetch('/showcase/chat', {
       method: 'POST', headers: { 'content-type': 'application/json' },

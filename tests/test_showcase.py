@@ -17,7 +17,7 @@ def test_showcase_page_serves_branding(tmp_path, monkeypatch):
     with TestClient(app) as client:
         resp = client.get("/showcase")
         assert resp.status_code == 200
-        assert "墨息" in resp.text
+        assert "Unwind" in resp.text
         assert "Hermes 决策轨迹" in resp.text
         assert "__SCRIPT__" not in resp.text  # script placeholder must be substituted
 
