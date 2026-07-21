@@ -81,6 +81,69 @@ SHOWCASE_HTML = r"""<!doctype html>
     background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' stitchTiles='stitch'/%3E%3CfeColorMatrix type='saturate' values='0'/%3E%3CfeComponentTransfer%3E%3CfeFuncA type='linear' slope='0.05'/%3E%3C/feComponentTransfer%3E%3C/filter%3E%3Crect width='160' height='160' filter='url(%23n)'/%3E%3C/svg%3E");
   }
 
+  /* ================= sound ripple field ================= */
+  #rippleCanvas {
+    position: fixed; inset: 0; z-index: -1; pointer-events: none;
+    opacity: 0; transition: opacity 1.2s ease;
+  }
+  #rippleCanvas.on { opacity: 1; }
+
+  /* ================= worry shredder ================= */
+  .shred-overlay {
+    position: fixed; inset: 0; z-index: 50; display: grid; place-items: center;
+    background: rgba(46, 40, 38, .32); backdrop-filter: blur(6px);
+    animation: fadeIn .3s ease both;
+  }
+  .shred-overlay.leaving { opacity: 0; transition: opacity .5s ease; }
+  .shred-note {
+    position: relative; width: min(340px, 80vw); padding: 30px 28px;
+    background:
+      radial-gradient(120% 100% at 15% 0%, rgba(185,208,198,.35), transparent 55%),
+      linear-gradient(168deg, #fffefb, #f3f0e8);
+    border: 1px solid rgba(88,78,72,.25); border-radius: 6px;
+    box-shadow: 0 30px 60px -24px rgba(30, 20, 18, .7);
+    font-family: var(--serif); font-size: 17px; line-height: 1.9; color: #3a3134;
+    transform-origin: 50% 55%;
+  }
+  .shred-note::before {
+    content: '烦 恼 寄 存'; position: absolute; top: -28px; left: 2px;
+    font-size: 11px; letter-spacing: .5em; color: rgba(255,255,252,.85);
+  }
+  .shred-note.crumple {
+    animation: crumple .75s cubic-bezier(.55,-.2,.6,1.2) forwards;
+  }
+  @keyframes crumple {
+    0%   { transform: none; border-radius: 6px; filter: none; }
+    45%  { transform: scale(.55) rotate(-7deg) skewX(6deg); border-radius: 30% 55% 40% 60%; }
+    100% { transform: scale(.12) rotate(14deg); border-radius: 50%; filter: brightness(.92); opacity: .9; }
+  }
+  .shred-bit {
+    position: fixed; z-index: 51; pointer-events: none;
+    width: 9px; height: 13px; border-radius: 2px;
+    background: linear-gradient(170deg, #fffefb, #efe9dd);
+    border: 1px solid rgba(88,78,72,.22);
+    will-change: transform, opacity;
+  }
+  .shred-done {
+    position: fixed; z-index: 52; left: 50%; top: 50%;
+    transform: translate(-50%, -50%) scale(.7); opacity: 0;
+    font-family: var(--serif); font-size: 20px; letter-spacing: .4em; text-indent: .4em;
+    color: #fff7f2; text-align: center;
+    padding: 14px 26px; border-radius: 999px;
+    background: rgba(63,124,89,.92);
+    box-shadow: 0 18px 40px -16px rgba(30,60,44,.8);
+    transition: all .45s cubic-bezier(.2,.9,.3,1.4);
+  }
+  .shred-done.show { transform: translate(-50%, -50%) scale(1); opacity: 1; }
+
+  /* breathe mic-follow */
+  .breathe-mic { margin-top: 20px; }
+  .breathe-mic .pill-btn.on {
+    color: #fff; background: linear-gradient(135deg, #6f9d84, var(--moss));
+    border-color: transparent;
+  }
+  .mic-hint { margin-top: 9px; font-size: 11px; color: var(--text-faint); letter-spacing: .1em; min-height: 16px; }
+
   /* click ripple (解压水纹) */
   .ripple {
     position: fixed; z-index: 0; pointer-events: none;
@@ -752,6 +815,7 @@ SHOWCASE_HTML = r"""<!doctype html>
   <div class="blob b1"></div><div class="blob b2"></div><div class="blob b3"></div><div class="blob b4"></div>
   <div class="halo"></div>
 </div>
+<canvas id="rippleCanvas" aria-hidden="true"></canvas>
 
 <div class="wrap">
   <header class="hero">
@@ -865,6 +929,10 @@ SHOWCASE_HTML = r"""<!doctype html>
     <div class="breathe-phase" id="breathePhase">准备</div>
     <div class="breathe-count" id="breatheCount">找个舒服的姿势</div>
     <div class="breathe-rounds" id="breatheRounds"><i></i><i></i><i></i></div>
+    <div class="breathe-mic">
+      <button class="pill-btn" id="breatheMicBtn" type="button"><span class="symbol" aria-hidden="true">🎙</span><span id="breatheMicLabel">跟随我的呼吸</span></button>
+      <div class="mic-hint" id="micHint"></div>
+    </div>
     <div class="breathe-actions" id="breatheActions" hidden>
       <button class="pill-btn" id="breatheAgain" type="button">再来一轮</button>
       <button class="pill-btn primary" id="breatheDone" type="button">回到对话</button>

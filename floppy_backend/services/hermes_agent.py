@@ -351,6 +351,7 @@ class HermesAgentRuntime:
         skill = action
         card_lines: list[str] = []
         card_title = ""
+        card_extra: dict[str, Any] = {}
         tool_input: dict[str, Any] = {}
         tool_output: dict[str, Any] = {}
         timer_sec = None
@@ -375,6 +376,7 @@ class HermesAgentRuntime:
             )
             card_title = "烦恼寄存"
             card_lines = [f"「{text}」", "已由 Unwind 保管，到点再还给你"]
+            card_extra = {"worry_text": text}  # frontend shredder animation
             tool_input, tool_output = {"text": text}, {"parked": True}
         elif action == "gratitude_moment":
             items = [i.strip()[:80] for i in decision.gratitude_items if i.strip()][:3]
@@ -434,6 +436,7 @@ class HermesAgentRuntime:
                 "skill": skill, "type": "ritual_receipt",
                 "title": card_title, "lines": card_lines,
                 "stamp": "已写入本地记录",
+                **card_extra,
             },
             tool_calls=[
                 hermes_call,

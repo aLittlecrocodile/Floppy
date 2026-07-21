@@ -1048,8 +1048,17 @@ function renderSkillCard(data) {
     if (card.note) body.insertAdjacentHTML('beforeend', '<div class="sc-note">' + esc(card.note) + '</div>');
   }
   if (!el) return;
-  streamEl.appendChild(el);
-  streamEl.scrollTop = streamEl.scrollHeight;
+  if (card.type === 'ritual_receipt' && card.skill === 'worry_parking' && card.worry_text) {
+    // 压力粉碎机: crumple + shred the worry before the receipt appears
+    const receipt = el;
+    playWorryShredder(card.worry_text, () => {
+      streamEl.appendChild(receipt);
+      streamEl.scrollTop = streamEl.scrollHeight;
+    });
+  } else {
+    streamEl.appendChild(el);
+    streamEl.scrollTop = streamEl.scrollHeight;
+  }
   // decision timeline: surface the tool trace on node 3
   const calls = (data.tool_calls || []).filter((c) => c.name !== 'hermes_agent');
   if (calls.length) {
@@ -1125,6 +1134,212 @@ function speakReply(url) {
     ttsPlayer.play().catch(() => { /* autoplay blocked until first gesture */ });
   } catch { /* voice is an enhancement */ }
 }
+
+/* ================= 压力粉碎机 ================= */
+const REDUCED_MOTION = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+function playWorryShredder(text, onDone) {
+  if (REDUCED_MOTION) { onDone(); return; }
+  const overlay = document.createElement('div');
+  overlay.className = 'shred-overlay';
+  const note = document.createElement('div');
+  note.className = 'shred-note';
+  note.textContent = text;
+  overlay.appendChild(note);
+  document.body.appendChild(overlay);
+  const finish = () => { overlay.remove(); onDone(); };
+  const failsafe = setTimeout(finish, 5200);  // never trap the receipt
+
+  setTimeout(() => note.classList.add('crumple'), 900);
+  setTimeout(() => {
+    const rect = note.getBoundingClientRect();
+    const cx = rect.left + rect.width / 2, cy = rect.top + rect.height / 2;
+    note.style.visibility = 'hidden';
+    burstShreds(cx, cy);
+    const done = document.createElement('div');
+    done.className = 'shred-done';
+    done.textContent = '已粉碎，交给我';
+    document.body.appendChild(done);
+    requestAnimationFrame(() => done.classList.add('show'));
+    setTimeout(() => { done.classList.remove('show'); overlay.classList.add('leaving'); }, 1400);
+    setTimeout(() => { done.remove(); clearTimeout(failsafe); finish(); }, 1950);
+  }, 1750);
+}
+function burstShreds(cx, cy) {
+  const bits = [];
+  for (let i = 0; i < 42; i++) {
+    const el = document.createElement('span');
+    el.className = 'shred-bit';
+    el.style.left = cx + 'px'; el.style.top = cy + 'px';
+    document.body.appendChild(el);
+    const angle = Math.random() * Math.PI * 2;
+    const speed = 3 + Math.random() * 7;
+    bits.push({
+      el, x: cx, y: cy,
+      vx: Math.cos(angle) * speed, vy: Math.sin(angle) * speed - 4,
+      rot: Math.random() * 360, vr: (Math.random() - .5) * 24,
+      life: 1,
+    });
+  }
+  const step = () => {
+    let alive = false;
+    for (const b of bits) {
+      b.vy += 0.32; b.x += b.vx; b.y += b.vy; b.rot += b.vr;
+      b.life -= 0.012;
+      if (b.life > 0 && b.y < innerHeight + 30) {
+        alive = true;
+        b.el.style.left = '0'; b.el.style.top = '0';
+        b.el.style.transform = 'translate(' + b.x + 'px, ' + b.y + 'px) rotate(' + b.rot + 'deg)';
+        b.el.style.opacity = Math.max(0, b.life);
+      } else {
+        b.el.remove();
+      }
+    }
+    if (alive) requestAnimationFrame(step);
+  };
+  requestAnimationFrame(step);
+}
+
+/* ================= 麦克风呼吸感应 ================= */
+const breatheMicBtn = $('breatheMicBtn'), breatheMicLabel = $('breatheMicLabel'), micHint = $('micHint');
+let micOn = false, micStreamRef = null, micCtx = null, micAnalyser = null, micRaf = null, micEnv = 0;
+async function startMicBreath() {
+  try {
+    micStreamRef = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: false, noiseSuppression: false } });
+  } catch {
+    micHint.textContent = '麦克风不可用，继续用引导节奏';
+    return;
+  }
+  clearBreathe();                       // guided timers off — you set the pace now
+  breatheActionsEl.hidden = true;
+  breatheRoundsEl.style.visibility = 'hidden';
+  micOn = true;
+  breatheMicBtn.classList.add('on');
+  breatheMicLabel.textContent = '正在听你的呼吸';
+  micHint.textContent = '对着麦克风慢慢呼气，球会跟着你落下';
+  micCtx = new (window.AudioContext || window.webkitAudioContext)();
+  const src = micCtx.createMediaStreamSource(micStreamRef);
+  micAnalyser = micCtx.createAnalyser();
+  micAnalyser.fftSize = 1024;
+  src.connect(micAnalyser);
+  orbEl.style.transitionDuration = '0.18s';
+  orbGlowEl.style.transitionDuration = '0.18s';
+  const buf = new Float32Array(micAnalyser.fftSize);
+  const loop = () => {
+    if (!micOn) return;
+    micAnalyser.getFloatTimeDomainData(buf);
+    let sum = 0;
+    for (let i = 0; i < buf.length; i++) sum += buf[i] * buf[i];
+    const rms = Math.sqrt(sum / buf.length);
+    micEnv = micEnv * 0.88 + rms * 0.12;          // smoothed breath envelope
+    const level = Math.min(1, micEnv * 14);
+    const scale = 1.02 - level * 0.4;              // exhale (audible) → orb settles
+    orbEl.style.transform = 'scale(' + scale.toFixed(3) + ')';
+    orbGlowEl.style.transform = 'scale(' + scale.toFixed(3) + ')';
+    breathePhaseEl.textContent = level > 0.22 ? '呼——' : '吸气';
+    breatheCountEl.textContent = level > 0.22 ? '把它都吐出去' : '轻轻地';
+    micRaf = requestAnimationFrame(loop);
+  };
+  loop();
+}
+function stopMicBreath(restartGuided) {
+  if (!micOn && !micStreamRef) return;
+  micOn = false;
+  if (micRaf) cancelAnimationFrame(micRaf);
+  if (micStreamRef) { micStreamRef.getTracks().forEach((t) => t.stop()); micStreamRef = null; }
+  if (micCtx && micCtx.state !== 'closed') micCtx.close();
+  micCtx = null; micAnalyser = null; micEnv = 0;
+  breatheMicBtn.classList.remove('on');
+  breatheMicLabel.textContent = '跟随我的呼吸';
+  micHint.textContent = '';
+  breatheRoundsEl.style.visibility = '';
+  if (restartGuided) startBreathe();
+}
+breatheMicBtn.addEventListener('click', () => {
+  if (micOn) stopMicBreath(true);
+  else startMicBreath();
+});
+// leaving the overlay must always release the mic — the close/done/again
+// buttons captured the ORIGINAL stopBreathe reference, so they get their own
+// mic-release listeners; the Escape path calls by name and hits the wrapper.
+const _origStopBreathe = stopBreathe;
+stopBreathe = function () { stopMicBreath(false); _origStopBreathe(); };
+$('breatheClose').addEventListener('click', () => stopMicBreath(false));
+$('breatheDone').addEventListener('click', () => stopMicBreath(false));
+$('breatheAgain').addEventListener('click', () => stopMicBreath(false));
+
+/* ================= 声音涟漪场 ================= */
+const rippleCanvas = $('rippleCanvas');
+let rippleCtx2d = null, rippleAnalyser = null, rippleAudioCtx = null, rippleRaf = null;
+let rippleBands = [0, 0, 0], rippleRings = [], lastLow = 0;
+function ensureRippleAudio() {
+  if (rippleAudioCtx || REDUCED_MOTION) return;
+  try {
+    rippleAudioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    const src = rippleAudioCtx.createMediaElementSource(player);
+    rippleAnalyser = rippleAudioCtx.createAnalyser();
+    rippleAnalyser.fftSize = 512;
+    src.connect(rippleAnalyser);
+    rippleAnalyser.connect(rippleAudioCtx.destination);  // keep audible!
+  } catch { rippleAudioCtx = null; }
+}
+function rippleResize() {
+  rippleCanvas.width = innerWidth;
+  rippleCanvas.height = innerHeight;
+}
+addEventListener('resize', rippleResize);
+function startRippleField() {
+  if (REDUCED_MOTION) return;
+  ensureRippleAudio();
+  if (!rippleAnalyser) return;
+  if (rippleAudioCtx.state === 'suspended') rippleAudioCtx.resume();
+  if (!rippleCtx2d) { rippleResize(); rippleCtx2d = rippleCanvas.getContext('2d'); }
+  rippleCanvas.classList.add('on');
+  if (rippleRaf) return;
+  const freq = new Uint8Array(rippleAnalyser.frequencyBinCount);
+  const draw = () => {
+    if (player.paused) {  // fade out and stop
+      rippleCanvas.classList.remove('on');
+      rippleCtx2d.clearRect(0, 0, rippleCanvas.width, rippleCanvas.height);
+      rippleRaf = null;
+      return;
+    }
+    rippleAnalyser.getByteFrequencyData(freq);
+    const band = (a, b) => { let s = 0; for (let i = a; i < b; i++) s += freq[i]; return s / (b - a) / 255; };
+    const low = band(1, 10), mid = band(12, 48), high = band(60, 160);
+    rippleBands[0] = rippleBands[0] * .82 + low * .18;
+    rippleBands[1] = rippleBands[1] * .82 + mid * .18;
+    rippleBands[2] = rippleBands[2] * .82 + high * .18;
+    // beat: rising low edge spawns an expanding ink ring
+    if (low > 0.32 && low - lastLow > 0.06 && rippleRings.length < 14) {
+      rippleRings.push({ r: 60, a: 0.35, v: 2.2 + low * 4 });
+    }
+    lastLow = low;
+    const W = rippleCanvas.width, H = rippleCanvas.height;
+    const cx = W / 2, cy = H + 40;   // ripples radiate from the nowbar
+    rippleCtx2d.clearRect(0, 0, W, H);
+    const colors = ['214,90,71', '78,125,96', '103,132,145'];
+    for (let k = 0; k < 3; k++) {
+      const level = rippleBands[k];
+      rippleCtx2d.beginPath();
+      rippleCtx2d.arc(cx, cy, 130 + k * 120 + level * 260, 0, Math.PI * 2);
+      rippleCtx2d.strokeStyle = 'rgba(' + colors[k] + ',' + (0.05 + level * 0.22).toFixed(3) + ')';
+      rippleCtx2d.lineWidth = 1.5 + level * 8;
+      rippleCtx2d.stroke();
+    }
+    rippleRings = rippleRings.filter((ring) => ring.a > 0.004);
+    for (const ring of rippleRings) {
+      ring.r += ring.v; ring.a *= 0.965;
+      rippleCtx2d.beginPath();
+      rippleCtx2d.arc(cx, cy, ring.r, 0, Math.PI * 2);
+      rippleCtx2d.strokeStyle = 'rgba(214,90,71,' + ring.a.toFixed(3) + ')';
+      rippleCtx2d.lineWidth = 1.2;
+      rippleCtx2d.stroke();
+    }
+    rippleRaf = requestAnimationFrame(draw);
+  };
+  rippleRaf = requestAnimationFrame(draw);
+}
+player.addEventListener('play', startRippleField);
 
 /* ================= 定时渐弱（播放器本地执行） ================= */
 let sleepTimerHandle = null, sleepTimerEnd = 0, baseSub = '';
