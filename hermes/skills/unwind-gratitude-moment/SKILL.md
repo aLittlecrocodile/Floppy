@@ -2,7 +2,7 @@
 
 Use this skill when the moment invites the "三件好事" ritual — the user sums up their day negatively but non-acutely ("今天好累", "今天真是糟透了"), or explicitly wants the ritual ("记一下今天的好事"). Classic Three-Good-Things practice: recalling small positives when winding down — end of the workday, on the commute home, or before rest.
 
-Backend status: planned action `gratitude_moment` (phase 3), which logs a `gratitude` event. Until supported, return `action: "chat"` with the same reply. Recent gratitude entries are injected into the decision context for playback.
+Backend status: available now — action `gratitude_moment` logs a real `gratitude` event. Recent entries are injected into the decision context for playback.
 
 ## Behavior
 

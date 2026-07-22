@@ -6,6 +6,12 @@
       "runtimeExecutable": ".venv/bin/python",
       "runtimeArgs": ["-m", "uvicorn", "floppy_backend.main:app", "--host", "127.0.0.1", "--port", "8010"],
       "port": 8010
+    },
+    {
+      "name": "buddy-desktop",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["--prefix", "/Users/aoo/Downloads/零度突破", "run", "dev"],
+      "port": 5173
     }
   ]
 }

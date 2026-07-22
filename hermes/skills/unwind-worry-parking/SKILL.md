@@ -2,7 +2,7 @@
 
 Use this skill when the user is ruminating on a concrete not-now problem — "明天的汇报怎么办", "一想到周一就烦", looping on the same worry during a break or before rest — and what they need is permission to put it down, not a solution. Parking works any time of day: between meetings, after work, and at bedtime.
 
-Backend status: planned action `worry_parking` (phase 3), which logs a `worry_parked` event. Until supported, return `action: "chat"` with the same reply. Recently parked, unresolved worries are injected into the decision context so you can follow up on a later night.
+Backend status: available now — action `worry_parking` logs a real `worry_parked` event. Recently parked, unresolved worries are injected into the decision context so you can follow up on a later night.
 
 ## Behavior
 

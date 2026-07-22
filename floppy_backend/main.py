@@ -644,8 +644,7 @@ def showcase_chat(payload: dict, background_tasks: BackgroundTasks):
         neisou_is_real=state.enterprise_search.available,
     )
     if demo is not None:
-        if demo.reply:
-            demo.reply_audio_url = _reply_audio_url(demo.reply)
+        _attach_reply_audio(demo)
         return demo
     req = AgentDecideRequest(
         user_id=SHOWCASE_USER_ID,
@@ -655,13 +654,20 @@ def showcase_chat(payload: dict, background_tasks: BackgroundTasks):
     )
     if state.enterprise_search.available and showcase_skills.is_intranet_quick(request_text):
         response = state.agent_runtime.run_neisou(req)
-        if response.reply:
-            response.reply_audio_url = _reply_audio_url(response.reply)
+        _attach_reply_audio(response)
         return response
     response = _run_agent_decide(req, background_tasks)
-    if response.reply:
-        response.reply_audio_url = _reply_audio_url(response.reply)
+    _attach_reply_audio(response)
     return response
+
+
+def _attach_reply_audio(response: AgentDecideResponse) -> None:
+    """Synthesize the spoken reply — but only when no real audio track is
+    about to play. A response with `asset` already set (play_asset, a
+    synchronous remix) has its own audio starting immediately; speaking the
+    "here's your track" reply over it means two tracks play at once."""
+    if response.reply and response.asset is None:
+        response.reply_audio_url = _reply_audio_url(response.reply)
 
 
 @app.get("/showcase/skills")

@@ -2,7 +2,7 @@
 
 Use this skill when the user wants playback to stop or fade after a while — "播 20 分钟就停", "半小时后关掉", "声音慢慢变小", "午休放 15 分钟", "别放一整晚".
 
-Backend status: planned action `sleep_timer` (phase 4). The timer executes on the frontend player (countdown + volume fade); the backend only logs an event. Until supported, return `action: "chat"` acknowledging the limit ("现在还不支持定时,你可以睡着后让它自己播完").
+Backend status: available now — action `sleep_timer` is live. The timer executes on the frontend player (countdown + volume fade); the backend only logs an event.
 
 ## Behavior
 
