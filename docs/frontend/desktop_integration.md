@@ -1,20 +1,31 @@
 # Unwind 桌面前端对接契约（打工小人 ↔ 后端）
 
-前后端分离后，桌面端（Electron「打工小人」，仓库 [aLittlecrocodile/unwind](https://github.com/aLittlecrocodile/unwind)）只依赖本文档描述的接口面。改动任何一侧前先对照这里。
+前后端分离后，桌面端（Swift 6 + AppKit 原生「打工小人」，仓库 [aLittlecrocodile/unwind](https://github.com/aLittlecrocodile/unwind) 的 `native/`）只依赖本文档描述的接口面。改动任何一侧前先对照这里。
+
+> 早期 Electron + React 原型已下线，不再维护；本文档已随之改写为原生客户端的契约。
 
 **文档分工**：本文 = 桌面端实际用到的最小契约（怎么调、拿到什么、该做什么）；全量 API 参考见 [backend_api_reference.md](backend_api_reference.md)；语音 WS 的逐事件详规见 [../contracts/voice_dialog_ws.md](../contracts/voice_dialog_ws.md)。
 
 ## 0. 总览
 
-| 用途 | 接口 | 桌面端调用方 |
-| --- | --- | --- |
-| 文字对话（决策智能体） | `POST /showcase/chat` | Electron 主进程代理（IPC `unwind:chat`，天然无 CORS） |
-| 按住/点按说话 | `WS /voice/ws?user_id=` | 渲染层直连（`src/lib/voicePtt.ts`） |
-| 音频文件 | `GET /audio/{object_key}` | `<audio>` 直接播（响应里给的都是完整 URL） |
-| 完整 Unwind 主窗 | `GET /showcase` | 新 `BrowserWindow` 直接加载 |
-| 健康检查 | `GET /health` | 启动脚本轮询 |
+原生进程直连后端，`URLSession`/`URLSessionWebSocketTask` 没有跨域概念，不需要任何代理层（这点和网页渲染进程不同）。桌宠（`PetWindowController`）只用文字对话和语音两条路径；"喘口气"完整主窗（`UnwindWindowController`）是**原生重实现**，不是加载 `/showcase` 网页，因此直接消费了更多接口：
 
-- **Base URL**：`http://127.0.0.1:8000`（桌面端写死；Electron 视 127.0.0.1 为安全源，`getUserMedia` 可用）。
+| 用途 | 接口 | 调用方（`native/Sources/UnwindApp/`） |
+| --- | --- | --- |
+| 文字对话（决策智能体） | `POST /showcase/chat` | `Networking/BackendClient.swift` |
+| 按住/点按说话 | `WS /voice/ws?user_id=` | `Networking/VoiceClients.swift`（`PushToTalkClient`） |
+| 语音通话（连续双工） | `WS /voice/realtime?user_id=` | `Networking/VoiceClients.swift`（`CallWindowController` 用） |
+| 技能矩阵 | `GET /showcase/skills` | `BackendClient.skills()` |
+| 场景 nudge 文案 | `GET /showcase/nudge?scenario=` | `BackendClient.nudge()` |
+| 推荐 | `GET /users/{id}/recommendations?limit=` | `BackendClient.recommendations()` |
+| 生成任务轮询 | `GET /generation-jobs/{id}` | `BackendClient.generationJob()` |
+| remix 任务轮询 | `GET /remix-jobs/{id}` | `BackendClient.remixJob()` |
+| 音频文件 | `GET /audio/{object_key}` | `AudioCoordinator`（`AVAudioPlayer`，响应里给的都是完整 URL） |
+| 健康检查 | `GET /health` | `BackendClient.health()`，启动时探活 |
+
+后 5 项（技能矩阵/nudge/推荐/两种任务轮询）字段级契约不在本文范围，去 [backend_api_reference.md](backend_api_reference.md) 对应小节查；这里只负责标注"桌面端确实在用"。
+
+- **Base URL**：`http://127.0.0.1:8000`（写死在 `BackendClient` 默认参数里；原生进程直连本机回环地址，没有网页的跨域/证书限制）。
 - **兼容性约定**：响应字段只增不改；所有可空字段都可能为 `null`；遇到不认识的字段/卡片类型**静默忽略**，不要报错。
 
 ## 1. 文字对话 `POST /showcase/chat`
@@ -132,4 +143,4 @@ curl -s -X POST http://127.0.0.1:8000/showcase/chat \
 
 ---
 
-维护约定：后端改到本文覆盖的任何接口时，同一个 PR 里更新本文；桌面端消费字段以 `src/lib/electronApi.ts` 的 `UnwindReply` 为准，两边不一致时以本文为仲裁。
+维护约定：后端改到本文覆盖的任何接口时，同一个 PR 里更新本文；桌面端消费字段以 `native/Sources/UnwindApp/Models/BackendModels.swift` 为准，两边不一致时以本文为仲裁。
