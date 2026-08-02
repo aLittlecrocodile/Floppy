@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -16,6 +15,13 @@ from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from pydantic import BaseModel, Field
 
 from floppy_backend.config import Settings, get_settings
+from floppy_backend.app_state import (
+    _generation_executor,
+    _reply_tts_executor,
+    repo,
+    state,
+    storage,
+)
 from floppy_backend.db import connect, initialize
 from floppy_backend.demo_page import DEMO_HTML
 from floppy_backend.models import (
@@ -77,29 +83,6 @@ _LOG_FILE = setup_logging(
 
 logger = logging.getLogger("floppy")
 logger.info("logging initialised -> %s", _LOG_FILE)
-
-# Inline generation runs here so a sync endpoint can enforce a wall-clock
-# budget (FIX: /voice/intent must answer inside the app's 60s timeout).
-_generation_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="genjob")
-# Small dedicated pool for reply TTS so a hung MiniMax call can't stall chat turns.
-_reply_tts_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="replytts")
-
-
-class AppState:
-    repository: Repository
-    storage: LocalFileStorage
-    profile_service: ProfileService
-    library: LibraryService
-    generation_service: GenerationService
-    remix_service: RemixService
-    agent_runtime: HermesAgentRuntime
-    settings: Settings
-    normalizer: RequestNormalizer
-    weather: WeatherService
-    enterprise_search: EnterpriseSearchService
-
-
-state = AppState()
 
 
 @asynccontextmanager
@@ -214,14 +197,6 @@ app.add_middleware(_RequestBaseURLMiddleware)
 # Access log (client IP + method + path + status + latency) -> logs/floppy.log.
 # Added last so it wraps outermost and sees the true request/response.
 app.add_middleware(AccessLogMiddleware)
-
-
-def repo() -> Repository:
-    return state.repository
-
-
-def storage() -> LocalFileStorage:
-    return state.storage
 
 
 def _hermes_reachable(base_url: str, timeout: float = 2.0) -> bool:
