@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+
 from floppy_backend.catalog import AUDIO_CATALOG
 from floppy_backend.models import AudioAssetIn, AudioType
 from floppy_backend.repositories import Repository
@@ -7,6 +9,8 @@ from floppy_backend.services.normalizer import RequestNormalizer
 from floppy_backend.storage import LocalFileStorage
 from floppy_backend.utils import sha256_json, sha256_text, text_embedding
 from floppy_backend.models import GenerationRequest
+
+logger = logging.getLogger(__name__)
 
 
 def _embedding_for(item: dict, voice_style: str) -> list[float]:
@@ -26,6 +30,7 @@ def _embedding_for(item: dict, voice_style: str) -> list[float]:
 def seed_assets(repository: Repository, storage: LocalFileStorage) -> int:
     normalizer = RequestNormalizer()
     created = 0
+    missing: list[str] = []
     for item in AUDIO_CATALOG:
         # Only real audio files (white_noise/music) are seeded as assets. The
         # TTS-readable entries (meditation/story/podcast) are NOT pre-seeded:
@@ -43,9 +48,10 @@ def seed_assets(repository: Repository, storage: LocalFileStorage) -> int:
         # Real audio file already imported under storage (real/...). Register it
         # directly so agent_graph can match it and remix can use it as a layer.
         object_key = item["object_key"]
-        path = storage.path_for(object_key)
+        path = storage.existing_path_for(object_key)
         if not path.exists():
             # File not imported yet; skip so seeding stays idempotent.
+            missing.append(object_key)
             continue
         content_hash = sha256_text(f"{object_key}:{path.stat().st_size}")
         prompt_hash = sha256_json({"title": item["title"], "object_key": object_key})
@@ -73,5 +79,15 @@ def seed_assets(repository: Repository, storage: LocalFileStorage) -> int:
             )
         )
         created += 1
+    if missing:
+        # A missing storage dir otherwise looks like an empty library instead of
+        # an error, so make the gap loud.
+        logger.warning(
+            "seed skipped %d/%d real assets: files missing under %s (first: %s)",
+            len(missing),
+            len(missing) + created,
+            storage.storage_dir,
+            ", ".join(missing[:3]),
+        )
     return created
 

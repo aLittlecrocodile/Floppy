@@ -1,6 +1,7 @@
 """Preset audio catalog for Floppy seed/pregen.
 
-Source: docs/preset_audio_catalog_v0.md + real audio pack (Floppy_audio_v3).
+Source: real audio pack (Floppy_audio_v3). This module is the source of truth
+for the preset catalog; the earlier docs/preset_audio_catalog_v0.md spec is gone.
 provider_strategy: "minimax" for TTS-readable, "real" for imported real audio.
 is_real: True for white_noise/music backed by real mp3 files under real/.
 """

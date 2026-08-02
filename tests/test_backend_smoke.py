@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from fastapi.testclient import TestClient
 
+from floppy_backend.catalog import AUDIO_CATALOG
 from floppy_backend.config import get_settings
 from floppy_backend.main import app, state
 from floppy_backend.models import AudioType
@@ -11,6 +12,18 @@ def _configure_tmp_app(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("FLOPPY_DATABASE_PATH", str(tmp_path / "floppy.db"))
     monkeypatch.setenv("FLOPPY_STORAGE_DIR", str(tmp_path / "audio"))
     get_settings.cache_clear()
+
+
+def _plant_real_assets(tmp_path, audio_type: str) -> None:
+    """Seeding skips catalog entries whose file is absent, so tests that need
+    seeded assets must place the files under the tmp storage dir first."""
+    root = tmp_path / "audio"
+    for item in AUDIO_CATALOG:
+        if not item.get("is_real") or item["audio_type"] != audio_type:
+            continue
+        path = root / item["object_key"]
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"\0" * 1024)
 
 
 def _profile_payload() -> dict:
@@ -85,11 +98,12 @@ def test_agent_decide_response_contract_smoke(tmp_path, monkeypatch):
 
 def test_remix_session_smoke(tmp_path, monkeypatch):
     _configure_tmp_app(monkeypatch, tmp_path)
+    _plant_real_assets(tmp_path, "music")
 
     with TestClient(app) as client:
         assert client.post("/admin/seed").status_code == 200
         assets = state.repository.list_assets(limit=20)
-        foreground = next((asset for asset in assets if asset.type != AudioType.WHITE_NOISE), assets[0])
+        foreground = next(asset for asset in assets if asset.type != AudioType.WHITE_NOISE)
 
         created = client.post(
             "/remix/sessions",
