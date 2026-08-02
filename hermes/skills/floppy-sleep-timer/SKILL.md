@@ -1,4 +1,4 @@
-# Unwind Sleep Timer
+# Floppy Sleep Timer
 
 Use this skill when the user wants playback to stop or fade after a while — "播 20 分钟就停", "半小时后关掉", "声音慢慢变小", "午休放 15 分钟", "别放一整晚".
 

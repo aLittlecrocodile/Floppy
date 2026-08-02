@@ -189,7 +189,7 @@ async function sendText(text) {
   sendBtn.disabled = true;
   addMsg('user', esc(text));
   tlReset();
-  const thinking = addMsg('assistant', '<span class="shimmer">Unwind 正在思考…</span>');
+  const thinking = addMsg('assistant', '<span class="shimmer">Floppy 正在思考…</span>');
   try {
     const r = await fetch(appPath('/showcase/chat'), {
       method: 'POST', headers: { 'content-type': 'application/json' },
@@ -396,20 +396,20 @@ const MIC_OPTIONS = { audio: { channelCount: 1, echoCancellation: true, noiseSup
 
 async function createCaptureWorklet(context, mediaStream, onFrame) {
   const workletCode = `
-    class UnwindPCMWorklet extends AudioWorkletProcessor {
+    class FloppyPCMWorklet extends AudioWorkletProcessor {
       process(inputs) {
         const channel = inputs[0][0];
         if (channel && channel.length) this.port.postMessage(channel.slice(0));
         return true;
       }
     }
-    registerProcessor('unwind-pcm-capture', UnwindPCMWorklet);
+    registerProcessor('floppy-pcm-capture', FloppyPCMWorklet);
   `;
   const moduleUrl = URL.createObjectURL(new Blob([workletCode], { type: 'application/javascript' }));
   await context.audioWorklet.addModule(moduleUrl);
   URL.revokeObjectURL(moduleUrl);
   const source = context.createMediaStreamSource(mediaStream);
-  const node = new AudioWorkletNode(context, 'unwind-pcm-capture');
+  const node = new AudioWorkletNode(context, 'floppy-pcm-capture');
   const silent = context.createGain();
   silent.gain.value = 0;
   node.port.onmessage = (event) => onFrame(event.data);
@@ -608,7 +608,7 @@ function queueCallPCM(arrayBuffer) {
   const startAt = Math.max(callOutputCtx.currentTime + .025, callNextPlayTime);
   source.start(startAt); callNextPlayTime = startAt + audioBuffer.duration;
   callSources.add(source); source.onended = () => callSources.delete(source);
-  setCallState('Unwind 正在回应', 'speaking');
+  setCallState('Floppy 正在回应', 'speaking');
 }
 function queuedCallAsset() {
   if (!callPendingAsset) return;
@@ -658,8 +658,8 @@ function handleRealtimeEvent(message) {
     if (!message.interim) { addMsg('user', esc(text)); callUserLine = null; }
   } else if (message.type === 'chat') {
     callAssistantText += message.text || '';
-    callAssistantLine = appendCallLine('assistant', 'Unwind', callAssistantText, callAssistantLine);
-    setCallState('Unwind 正在回应', 'speaking');
+    callAssistantLine = appendCallLine('assistant', 'Floppy', callAssistantText, callAssistantLine);
+    setCallState('Floppy 正在回应', 'speaking');
   } else if (message.type === 'tts_end') {
     if (callAssistantText) addMsg('assistant', esc(callAssistantText));
     callAssistantText = ''; callAssistantLine = null;
@@ -908,7 +908,7 @@ function saveCardImage(text) {
   // download
   const a = document.createElement('a');
   a.href = canvas.toDataURL('image/png');
-  a.download = 'unwind-comfort-card.png';
+  a.download = 'floppy-comfort-card.png';
   a.click();
 }
 
@@ -1114,7 +1114,7 @@ nudgeDismiss.addEventListener('click', () => { nudgeEl.hidden = true; });
 
 /* ================= 开口说话（回复 TTS） ================= */
 const speakBtn = $('speakBtn');
-let speakOn = localStorage.getItem('unwind_speak') !== 'off';
+let speakOn = localStorage.getItem('floppy_speak') !== 'off';
 function renderSpeakBtn() {
   speakBtn.classList.toggle('muted', !speakOn);
   speakBtn.querySelector('.symbol').textContent = speakOn ? '🔊' : '🔇';
@@ -1122,7 +1122,7 @@ function renderSpeakBtn() {
 renderSpeakBtn();
 speakBtn.addEventListener('click', () => {
   speakOn = !speakOn;
-  localStorage.setItem('unwind_speak', speakOn ? 'on' : 'off');
+  localStorage.setItem('floppy_speak', speakOn ? 'on' : 'off');
   if (!speakOn) { try { ttsPlayer.pause(); } catch {} }
   renderSpeakBtn();
 });

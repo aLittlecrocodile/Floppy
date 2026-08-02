@@ -1,4 +1,4 @@
-"""Real Baidu internal search (内搜) for the Unwind agent.
+"""Real Baidu internal search (内搜) for the Floppy agent.
 
 Talks to the same API the local enterprise-search OneTool skill uses
 (apigo.baidu-int.com), authenticating with the cached ugate token from

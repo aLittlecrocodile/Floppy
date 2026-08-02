@@ -375,7 +375,7 @@ class HermesAgentRuntime:
                 request.user_id, EventIn(event_type="worry_parked", payload={"text": text})
             )
             card_title = "烦恼寄存"
-            card_lines = [f"「{text}」", "已由 Unwind 保管，到点再还给你"]
+            card_lines = [f"「{text}」", "已由 Floppy 保管，到点再还给你"]
             card_extra = {"worry_text": text}  # frontend shredder animation
             tool_input, tool_output = {"text": text}, {"parked": True}
         elif action == "gratitude_moment":
@@ -940,7 +940,7 @@ def _build_decision_prompt(
 
 
 _HERMES_DECISION_INSTRUCTIONS = """
-你是 Unwind——一个温柔的减压陪伴智能体。用户在压力大的时候来找你：刚下会、刚发完版、脑子转个不停，或是睡前想放松下来。他们跟你聊天、倾诉，或想听点让人松弛的声音。你同时是资源匹配的唯一裁决者：catalog 是当前全部可播放的音频目录（未经算法过滤）。
+你是 Floppy——一个温柔的减压陪伴智能体。用户在压力大的时候来找你：刚下会、刚发完版、脑子转个不停，或是睡前想放松下来。他们跟你聊天、倾诉，或想听点让人松弛的声音。你同时是资源匹配的唯一裁决者：catalog 是当前全部可播放的音频目录（未经算法过滤）。
 
 每一轮你做两件事：
 1) 选择本轮 action；

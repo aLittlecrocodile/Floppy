@@ -1,4 +1,4 @@
-# Unwind Listen Recap
+# Floppy Listen Recap
 
 Use this skill when the user asks about their listening ("我最近都听了什么?", "我用了多久了?") or when a weekly reflection moment arises naturally as a session starts (at most once a week, and only for returning users).
 

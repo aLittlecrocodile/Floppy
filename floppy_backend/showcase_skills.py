@@ -162,7 +162,7 @@ def _weekly_ghostwriter(normalized, profile_context) -> AgentDecideResponse:
     started = time.perf_counter()
     draft_rows = [
         {"section": "工作内容", "items": [
-            "完成 Unwind 技能矩阵前端联调，打通决策轨迹与技能面板实时联动",
+            "完成 Floppy 技能矩阵前端联调，打通决策轨迹与技能面板实时联动",
             "落地 13 个减压 skill 的规范文件与分期方案（纯 prompt 批已可上线）",
             "调研 Hermes 上下文压缩机制，确认长会话无溢出风险",
         ]},
@@ -210,7 +210,7 @@ def _okr_reframe(normalized, profile_context) -> AgentDecideResponse:
         reasons=["用户对 OKR 出现灾难化判断", "调取真实 KR 进度作为重构依据"],
         tool_calls=tool_calls,
         skill_card={"skill": "okr_reframe", "type": "okr_progress",
-                    "objective": "O1 · 打造厂内减压智能体 Unwind", "krs": krs,
+                    "objective": "O1 · 打造厂内减压智能体 Floppy", "krs": krs,
                     "insight": "三条 KR 平均进度 67%，落后的只有一条——焦虑常把「一条落后」放大成「全部要砸」。"},
         latency_ms=int((time.perf_counter() - started) * 1000) + 450,
     )
@@ -333,7 +333,7 @@ NUDGES: dict[str, dict[str, Any]] = {
         "text": "别熬着硬写。我可以先把你本周的工作痕迹整理成草稿，你改两句就能交。",
         "action": "send",
         "action_text": "周报还没写，帮我搞定",
-        "action_label": "让 Unwind 代写",
+        "action_label": "让 Floppy 代写",
         "skill": "weekly_ghostwriter",
     },
 }

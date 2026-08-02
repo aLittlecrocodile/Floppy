@@ -1,14 +1,14 @@
-# Unwind 文档索引
+# Floppy 文档索引
 
-这里是 Unwind 后端、体验页和音频生成链路的文档入口。当前实现优先看“启动与体验”“接口对接”和“运行契约”。历史决策请查 `git log`，不再单独维护开发记录文档。
+这里是 Floppy 后端、体验页和音频生成链路的文档入口。当前实现优先看“启动与体验”“接口对接”和“运行契约”。历史决策请查 `git log`，不再单独维护开发记录文档。
 
 ## 启动与体验
 
 - [STARTUP.md](STARTUP.md)
   本地或服务器启动、环境变量、数据迁移和联调检查。
 
-- [../popo/unwind/index.html](../popo/unwind/index.html)
-  Unwind 产品介绍入口页，所有体验按钮进入 `/showcase`。
+- [../popo/floppy/index.html](../popo/floppy/index.html)
+  Floppy 产品介绍入口页，所有体验按钮进入 `/showcase`。
 
 ## 接口对接
 

@@ -1,4 +1,4 @@
-# Unwind Weather Brief
+# Floppy Weather Brief
 
 Use this skill when the user asks about weather — "明天要不要带伞?", "今晚冷不冷?", "明天天气怎么样?" — or when tonight's real weather offers a natural bridge to audio ("外面在下雨" → real rain outside pairs with rain audio).
 

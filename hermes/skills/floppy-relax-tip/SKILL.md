@@ -1,4 +1,4 @@
-# Unwind Relax Tip
+# Floppy Relax Tip
 
 Use this skill when the user is anxious, tense, or panicky RIGHT NOW and needs immediate relief — "我现在很紧张", "心跳好快", "静不下来", "焦虑得睡不着" — and a full generated meditation audio would be too slow. This delivers an instant guided exercise inside the reply itself.
 

@@ -1,6 +1,6 @@
-# Unwind Skill 体系扩展设计
+# Floppy Skill 体系扩展设计
 
-> 状态:设计稿(未实施)。**定位基线:Unwind 是减压产品,不是催眠/助眠产品——睡前只是场景之一,skill 触发与文案都不以"晚安/入睡"为中心。**本文档回答两个问题:
+> 状态:设计稿(未实施)。**定位基线:Floppy 是减压产品,不是催眠/助眠产品——睡前只是场景之一,skill 触发与文案都不以"晚安/入睡"为中心。**本文档回答两个问题:
 >
 > ① 对话记忆会不会"爆"、要不要做压缩;② 产品从"助眠 App"升级为"全天候减压陪伴 App",智能体应该长出哪些 skill。
 
@@ -155,7 +155,7 @@
 
 ### 3.2.3 Skill 规范文件
 
-全部 13 个 skill 已按 Hermes skill 规范落成文件:`hermes/skills/unwind-<name>/SKILL.md`(与 `floppy-sleep-audio` 同格式:触发时机 → 行为要求 → 输出 JSON → 决策优先级)。纯 prompt 型 skill 走现有 `chat` action、当前即可生效;带新 action 的 skill 在文件中注明了后端支持状态(phase)与"后端未支持时降级为 `chat`"的规则,契约字段(`mood_score`/`worry_text`/`gratitude_items`/`timer_sec`/`fade_out`/`profile_patch`)以 SKILL.md 为准。
+全部 13 个 skill 已按 Hermes skill 规范落成文件:`hermes/skills/floppy-<name>/SKILL.md`(与 `floppy-sleep-audio` 同格式:触发时机 → 行为要求 → 输出 JSON → 决策优先级)。纯 prompt 型 skill 走现有 `chat` action、当前即可生效;带新 action 的 skill 在文件中注明了后端支持状态(phase)与"后端未支持时降级为 `chat`"的规则,契约字段(`mood_score`/`worry_text`/`gratitude_items`/`timer_sec`/`fade_out`/`profile_patch`)以 SKILL.md 为准。
 
 ### 3.3 分期
 

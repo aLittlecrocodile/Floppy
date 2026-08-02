@@ -1,4 +1,4 @@
-# Unwind Mood Checkin
+# Floppy Mood Checkin
 
 Use this skill when the user gives today's mood a rating — after you asked "今天感觉怎么样,1 到 10?" — or spontaneously states one ("今天大概 6 分吧"). Also use it to *initiate* the ask when a returning user shows up to wind down and no checkin happened yet today (at most once per day, and never mid-crisis).
 

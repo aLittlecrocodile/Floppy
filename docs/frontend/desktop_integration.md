@@ -1,4 +1,4 @@
-# Unwind 桌面前端对接契约（打工小人 ↔ 后端）
+# Floppy 桌面前端对接契约（打工小人 ↔ 后端）
 
 前后端分离后，桌面端（Swift 6 + AppKit 原生「打工小人」，仓库 [aLittlecrocodile/unwind](https://github.com/aLittlecrocodile/unwind) 的 `native/`）只依赖本文档描述的接口面。改动任何一侧前先对照这里。
 
@@ -8,9 +8,9 @@
 
 ## 0. 总览
 
-原生进程直连后端，`URLSession`/`URLSessionWebSocketTask` 没有跨域概念，不需要任何代理层（这点和网页渲染进程不同）。桌宠（`PetWindowController`）只用文字对话和语音两条路径；"喘口气"完整主窗（`UnwindWindowController`）是**原生重实现**，不是加载 `/showcase` 网页，因此直接消费了更多接口：
+原生进程直连后端，`URLSession`/`URLSessionWebSocketTask` 没有跨域概念，不需要任何代理层（这点和网页渲染进程不同）。桌宠（`PetWindowController`）只用文字对话和语音两条路径；"喘口气"完整主窗（`FloppyWindowController`）是**原生重实现**，不是加载 `/showcase` 网页，因此直接消费了更多接口：
 
-| 用途 | 接口 | 调用方（`native/Sources/UnwindApp/`） |
+| 用途 | 接口 | 调用方（`native/Sources/FloppyApp/`） |
 | --- | --- | --- |
 | 文字对话（决策智能体） | `POST /showcase/chat` | `Networking/BackendClient.swift` |
 | 按住/点按说话 | `WS /voice/ws?user_id=` | `Networking/VoiceClients.swift`（`PushToTalkClient`） |
@@ -44,7 +44,7 @@
 响应是 `AgentDecideResponse`。桌面端需要消费的字段（其余字段是决策轨迹可视化用的，桌宠可忽略）：
 
 ```ts
-interface UnwindReply {
+interface FloppyReply {
   action: 'chat' | 'play_asset' | 'generate_job' | 'remix_current' | 'no_match'
   reply: string | null            // 小人要说的话（气泡文案）
   reply_audio_url: string | null  // reply 的 TTS 语音，完整 URL
@@ -85,7 +85,7 @@ interface UnwindReply {
 | `weekly_draft` | `rows[] {section,content}` | 周报代笔 demo |
 | `okr_progress` | `objective`, `krs[] {name,progress}` | OKR 重构 demo |
 
-桌宠形态可以只渲染 `reply` 而忽略卡片（当前实现）；Unwind 主窗按类型出卡。**未知 type 一律忽略**。
+桌宠形态可以只渲染 `reply` 而忽略卡片（当前实现）；Floppy 主窗按类型出卡。**未知 type 一律忽略**。
 
 ## 3. 语音对话 `WS /voice/ws`
 
@@ -143,4 +143,4 @@ curl -s -X POST http://127.0.0.1:8000/showcase/chat \
 
 ---
 
-维护约定：后端改到本文覆盖的任何接口时，同一个 PR 里更新本文；桌面端消费字段以 `native/Sources/UnwindApp/Models/BackendModels.swift` 为准，两边不一致时以本文为仲裁。
+维护约定：后端改到本文覆盖的任何接口时，同一个 PR 里更新本文；桌面端消费字段以 `native/Sources/FloppyApp/Models/BackendModels.swift` 为准，两边不一致时以本文为仲裁。

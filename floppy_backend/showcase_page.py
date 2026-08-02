@@ -3,7 +3,7 @@ SHOWCASE_HTML = r"""<!doctype html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Unwind · 把压力，呼出去</title>
+<title>Floppy · 把压力，呼出去</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='13' fill='%23d65a47'/%3E%3Ccircle cx='21' cy='13' r='11' fill='%23f4f1ea'/%3E%3C/svg%3E">
 <style>
   :root {
@@ -821,7 +821,7 @@ SHOWCASE_HTML = r"""<!doctype html>
   <header class="hero">
     <div class="brand-lockup">
       <div class="mascot"><img src="showcase/assets/baidu-bear.png" alt="百度小熊"></div>
-      <div class="wordmark">Unwind</div>
+      <div class="wordmark">Floppy</div>
     </div>
     <div class="tagline">让各位同学，压力小一点</div>
     <div class="header-actions">
@@ -849,7 +849,7 @@ SHOWCASE_HTML = r"""<!doctype html>
 
   <main>
     <section class="card chat">
-      <div class="chat-head">说说你现在的状态 — Unwind 会自己决定陪你聊、放一段声音，还是现场为你生成</div>
+      <div class="chat-head">说说你现在的状态 — Floppy 会自己决定陪你聊、放一段声音，还是现场为你生成</div>
       <div class="nudge" id="nudge" hidden>
         <span class="ic" id="nudgeIcon">☕</span>
         <div class="nbody">
@@ -860,7 +860,7 @@ SHOWCASE_HTML = r"""<!doctype html>
         <button class="ndismiss" id="nudgeDismiss" type="button" aria-label="关闭">×</button>
       </div>
       <div class="stream" id="stream">
-        <div class="msg assistant">你好，我是 Unwind。刚下会？发版了？还是脑子转个不停——说说看，我来帮你按下暂停键。</div>
+        <div class="msg assistant">你好，我是 Floppy。刚下会？发版了？还是脑子转个不停——说说看，我来帮你按下暂停键。</div>
       </div>
       <div class="chips" id="chips">
         <button class="chip">刚下线一个大版本，脑子还在转，帮我放松一下</button>
@@ -945,7 +945,7 @@ SHOWCASE_HTML = r"""<!doctype html>
     <button class="call-close" id="callClose" type="button" aria-label="关闭通话窗口">×</button>
     <div class="call-avatar" id="callAvatar"><img src="showcase/assets/baidu-bear.png" alt="百度小熊"></div>
     <div class="call-kicker">UNWIND VOICE</div>
-    <h2 id="callTitle">和 Unwind 聊一会儿</h2>
+    <h2 id="callTitle">和 Floppy 聊一会儿</h2>
     <div class="call-state" id="callState">准备接通</div>
     <div class="call-timer" id="callTimer">00:00</div>
     <div class="call-wave" id="callWave" aria-hidden="true"><span></span><span></span><span></span><span></span><span></span><span></span><span></span></div>

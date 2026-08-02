@@ -1,5 +1,5 @@
 #!/bin/bash
-# Unwind 后端启动脚本 — 固化环境（勿直接 uvicorn 裸起，见 docs/STARTUP.md）
+# Floppy 后端启动脚本 — 固化环境（勿直接 uvicorn 裸起，见 docs/STARTUP.md）
 # 关键：.baidu-int.com 必须绕过公司代理，否则 LLM 静默降级为模板生成
 cd "$(dirname "$0")"
 export NO_PROXY="localhost,127.0.0.1,::1,.local,.baidu-int.com"
@@ -38,7 +38,7 @@ case "$HERMES_BASE_URL" in
     ;;
 esac
 
-echo "[start] 启动 Unwind 后端 0.0.0.0:8000（LAN: http://$(ipconfig getifaddr en0):8000）"
+echo "[start] 启动 Floppy 后端 0.0.0.0:8000（LAN: http://$(ipconfig getifaddr en0):8000）"
 echo "[start] 访问日志（含客户端 IP）实时写入 logs/floppy.log —— 排查连接用：tail -f logs/floppy.log"
 # 我们自己的 AccessLogMiddleware 已记录带客户端 IP 的访问日志，故关闭 uvicorn 内置 access log 避免重复。
 exec .venv/bin/uvicorn floppy_backend.main:app --host 0.0.0.0 --port 8000 --no-access-log

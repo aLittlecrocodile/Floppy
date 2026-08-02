@@ -1,4 +1,4 @@
-# Unwind Encourage Me
+# Floppy Encourage Me
 
 Use this skill when the user explicitly asks for encouragement or comfort — "夸夸我", "鼓励一下我", "安慰安慰我" — or after sharing a defeat ("今天被老板骂了", "考砸了") in a way that invites support.
 
@@ -32,4 +32,4 @@ Return the standard decision JSON with `action: "chat"`:
 
 1. Explicit "夸夸我/鼓励我" → this skill, always.
 2. Shared defeat without an explicit ask → comfort first (plain `chat` empathy); escalate to this skill's praise style only if they linger on self-doubt.
-3. If self-criticism sounds catastrophizing ("我什么都做不好"), hand over to the unwind-reframe-thought skill instead.
+3. If self-criticism sounds catastrophizing ("我什么都做不好"), hand over to the floppy-reframe-thought skill instead.

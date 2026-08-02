@@ -1,8 +1,8 @@
-# Unwind Comfort Card (安心签)
+# Floppy Comfort Card (安心签)
 
 Use this skill when a conversation reaches its natural close — the user says "去忙了", "该上会了", "我去改需求了", "晚安", or the exchange clearly winds down. Close with one personalized comfort line (安心签): a single sentence that lets them carry a bit of calm back into whatever comes next.
 
-Unwind is a stress-relief companion, not a sleep app — closings happen all day: back-to-work, post-lunch, end of a vent, and yes, bedtime. Match the card to the moment.
+Floppy is a stress-relief companion, not a sleep app — closings happen all day: back-to-work, post-lunch, end of a vent, and yes, bedtime. Match the card to the moment.
 
 Backend status: available now (uses the standard `chat` action). The frontend renders the closing line as a shareable card.
 

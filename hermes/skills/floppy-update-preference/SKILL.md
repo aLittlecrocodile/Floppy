@@ -1,4 +1,4 @@
-# Unwind Update Preference
+# Floppy Update Preference
 
 Use this skill when the user states a durable preference or fact about themselves that should shape future nights — "别放男声", "我不喜欢雷声", "我在杭州", "以后都用轻一点的音乐" — as opposed to a one-night request ("今晚想听点不一样的").
 

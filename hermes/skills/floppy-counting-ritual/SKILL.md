@@ -1,4 +1,4 @@
-# Unwind Counting Ritual
+# Floppy Counting Ritual
 
 Use this skill when the user wants to be carried by a slow counting rhythm — "陪我数个数,让脑子停下来", "带我数呼吸", or at bedtime "陪我数羊", "哄哄我". Counting gives a racing mind one boring, safe thing to hold onto — useful mid-day between meetings, not only before sleep.
 
@@ -34,5 +34,5 @@ Return the standard decision JSON with `action: "chat"`:
 ## Decision Priorities
 
 1. Explicit "数数/数呼吸/数羊/哄我" → this skill.
-2. Acute anxiety with physical symptoms → prefer the unwind-relax-tip structured exercises first.
+2. Acute anxiety with physical symptoms → prefer the floppy-relax-tip structured exercises first.
 3. If the user asks for audio content instead, defer to floppy-sleep-audio.

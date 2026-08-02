@@ -1,4 +1,4 @@
-# Unwind Worry Parking
+# Floppy Worry Parking
 
 Use this skill when the user is ruminating on a concrete not-now problem — "明天的汇报怎么办", "一想到周一就烦", looping on the same worry during a break or before rest — and what they need is permission to put it down, not a solution. Parking works any time of day: between meetings, after work, and at bedtime.
 
@@ -34,6 +34,6 @@ Worry-postponement ritual: name it, park it, hand it back at the right time.
 ## Decision Priorities
 
 1. Rumination on a concrete worry during downtime → this skill.
-2. If the worry carries catastrophizing distortion, run unwind-reframe-thought first; park what remains after.
+2. If the worry carries catastrophizing distortion, run floppy-reframe-thought first; park what remains after.
 3. Crisis signals → never park; switch to the reframe-thought skill's safety boundary.
-4. After parking, a soft bridge is natural — audio ("要不要放点声音,把脑子交给雨声?") or a breathing round (unwind-relax-tip).
+4. After parking, a soft bridge is natural — audio ("要不要放点声音,把脑子交给雨声?") or a breathing round (floppy-relax-tip).

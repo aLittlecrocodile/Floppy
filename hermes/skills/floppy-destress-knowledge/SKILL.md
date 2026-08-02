@@ -1,4 +1,4 @@
-# Unwind Destress Knowledge
+# Floppy Destress Knowledge
 
 Use this skill when the user asks a factual question about stress, relaxation, or rest — "为什么一焦虑就胃疼?", "深呼吸真的有用吗?", "白噪音是智商税吗?", "午睡多久合适?", "为什么越累越睡不着?".
 

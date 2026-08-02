@@ -18,7 +18,7 @@ def test_showcase_page_serves_branding(tmp_path, monkeypatch):
     with TestClient(app) as client:
         resp = client.get("/showcase")
         assert resp.status_code == 200
-        assert "Unwind" in resp.text
+        assert "Floppy" in resp.text
         assert "智能体决策轨迹" in resp.text
         assert "Hermes" not in resp.text
         assert 'id="callBtn"' in resp.text

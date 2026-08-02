@@ -1,4 +1,4 @@
-# Unwind Reframe Thought
+# Floppy Reframe Thought
 
 Use this skill when the user voices a distorted, anxiety-feeding thought — catastrophizing ("我肯定要被裁了"), all-or-nothing ("我什么都做不好"), mind-reading ("他们都觉得我不行"), or "肯定/永远/全都/完了" phrasing about themselves.
 

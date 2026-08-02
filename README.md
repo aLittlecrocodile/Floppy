@@ -1,15 +1,15 @@
-# Unwind · Backend MVP
+# Floppy · Backend MVP
 
-Unwind 是面向高压研发团队的 AI 原生减压陪伴工具，让大家的压力小一点。当前仓库同时包含后端能力、体验页和部署配置：
+Floppy 是面向高压研发团队的 AI 原生减压陪伴工具，让大家的压力小一点。当前仓库同时包含后端能力、体验页和部署配置：
 
 - 自然对话：理解用户此刻的状态，决定适合的陪伴方式。
 - 语音陪伴：通过实时语音链路完成识别、对话和语音回复。
 - 音频生成：生成故事、冥想、ASMR、音乐和环境声，并支持缓存复用。
 - 用户画像与推荐：根据偏好、反馈和历史内容改进后续推荐。
-- 体验入口：`popo/unwind/index.html` 是 Unwind 的产品介绍页，`/showcase` 是可交互体验页。
+- 体验入口：`popo/floppy/index.html` 是 Floppy 的产品介绍页，`/showcase` 是可交互体验页。
 - 工程基础：SQLite 元数据、本地音频存储、可替换的 MiniMax provider 和 Agent workflow。
 
-代码包仍使用 `floppy_backend` 名称，这是历史包名和运行入口的一部分；产品名称统一使用 Unwind。
+代码包仍使用 `floppy_backend` 名称，这是历史包名和运行入口的一部分；产品名称统一使用 Floppy。
 
 ## Run
 
