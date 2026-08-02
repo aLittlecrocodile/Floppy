@@ -4,8 +4,8 @@ Lives outside main.py so router modules can reach the service singletons
 without importing floppy_backend.main (which imports the routers, so that
 direction would be a cycle).
 
-`lifespan` intentionally stays in main.py: it also kicks off reply-TTS
-prewarming, which depends on helpers defined there.
+`lifespan` still lives in main.py, but its reply-TTS prewarm now calls
+`services.reply_audio`, so nothing keeps it there any more.
 """
 
 from __future__ import annotations

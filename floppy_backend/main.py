@@ -70,6 +70,13 @@ from floppy_backend.services.profile import ProfileService
 from floppy_backend.services.remix import RemixService
 from floppy_backend.services.weather import WeatherService
 from floppy_backend.services.enterprise_search import EnterpriseSearchService
+from floppy_backend.services.reply_audio import (
+    attach_reply_audio,
+    ensure_demo_profile,
+    notify_audio_url,
+    reply_audio_url,
+    run_agent_decide,
+)
 from floppy_backend.services.script import SleepScriptService
 from floppy_backend.storage import LocalFileStorage, set_request_base_url
 from floppy_backend.logging_setup import AccessLogMiddleware, setup_logging
@@ -158,12 +165,12 @@ async def lifespan(app: FastAPI):
     except Exception:  # noqa: BLE001 — seeding is best-effort at startup
         pass
     # 预热兜底播报语音（固定文案），之后所有播报零延迟命中文件缓存
-    _reply_tts_executor.submit(_notify_audio_url)
+    _reply_tts_executor.submit(notify_audio_url)
 
     def _warm_demo_replies() -> None:
         for line in showcase_skills.DEMO_SPOKEN_LINES:
             try:
-                _reply_audio_url(line)
+                reply_audio_url(line)
             except Exception:  # noqa: BLE001 — prewarm is best-effort
                 pass
 
@@ -217,28 +224,6 @@ def health(settings: Settings = Depends(get_settings)):
         "hermes": "ok" if _hermes_reachable(settings.hermes_base_url) else "down",
         "public_base_url": settings.public_base_url,
     }
-
-
-def _ensure_demo_profile(user_id: str) -> None:
-    """Make sure a user has a profile (catalog is seeded at startup).
-
-    Voice dialog and /demo/chat both need a profile for the agent runtime to run;
-    new ad-hoc users (e.g. a browser session) get a sensible sleep default.
-    """
-    if state.repository.get_profile(user_id) is None:
-        state.profile_service.upsert_profile(
-            user_id,
-            UserProfileIn(
-                audio_type_preferences=[AudioType.MEDITATION, AudioType.WHITE_NOISE, AudioType.STORY],
-                voice_preferences=["warm_female"],
-                background_preferences=["rain_soft"],
-                duration_preference_min=15,
-                stress_level=ProfileLevel.HIGH,
-                anxiety_level=ProfileLevel.HIGH,
-                avg_sleep_latency_min=40,
-                mood_tags=["anxiety_relief"],
-            ),
-        )
 
 
 def _resolve_audio_asset(user_id: str, request_text: str) -> dict | None:
@@ -297,7 +282,7 @@ async def voice_ws(websocket: WebSocket):
 
     # Resolve a sleep-audio asset via the agent runtime (off the event loop).
     resolve_user_id = user_id or "voice_demo_user"
-    await asyncio.to_thread(_ensure_demo_profile, resolve_user_id)
+    await asyncio.to_thread(ensure_demo_profile, resolve_user_id)
 
     async def _audio_resolver(request_text: str, audio_type: str) -> dict | None:
         asset = await asyncio.to_thread(_resolve_audio_asset, resolve_user_id, request_text)
@@ -565,36 +550,9 @@ def record_event(user_id: str, event: EventIn, repository: Repository = Depends(
     return {"event_id": event_id}
 
 
-def _run_agent_decide(req: AgentDecideRequest, background_tasks: BackgroundTasks) -> AgentDecideResponse:
-    try:
-        response = state.agent_runtime.run(req)
-    except BudgetExceededError as exc:
-        raise HTTPException(status_code=429, detail=str(exc)) from exc
-    except ValueError as exc:
-        if "profile not found" in str(exc):
-            raise HTTPException(status_code=404, detail="profile not found") from exc
-        raise
-
-    if response.action == "generate_job" and response.job_id:
-        # A job already in flight is being executed by whoever enqueued it —
-        # scheduling a second run would only tie up a worker waiting on it.
-        in_flight = any(
-            call.name == "generate_sleep_audio" and (call.output or {}).get("match_type") == "in_flight"
-            for call in response.tool_calls
-        )
-        if not in_flight:
-            background_tasks.add_task(
-                state.generation_service.run_job,
-                response.job_id,
-                req.user_id,
-                GenerationRequest(request_text=req.request_text, force_generate=True),
-            )
-    return response
-
-
 @app.post("/agent/decide", response_model=AgentDecideResponse)
 def agent_decide(req: AgentDecideRequest, background_tasks: BackgroundTasks):
-    return _run_agent_decide(req, background_tasks)
+    return run_agent_decide(req, background_tasks)
 
 
 SHOWCASE_USER_ID = "showcase_user"
@@ -606,7 +564,7 @@ def showcase_chat(payload: dict, background_tasks: BackgroundTasks):
     if len(request_text) < 2:
         raise HTTPException(status_code=400, detail="request_text is required")
     current_asset_id = payload.get("current_asset_id") or None
-    _ensure_demo_profile(SHOWCASE_USER_ID)
+    ensure_demo_profile(SHOWCASE_USER_ID)
     # OneTool demo flows short-circuit before Hermes: deterministic, fast,
     # and stage-proof. Everything else goes to the real agent runtime.
     demo = showcase_skills.route_showcase_demo(
@@ -619,7 +577,7 @@ def showcase_chat(payload: dict, background_tasks: BackgroundTasks):
         neisou_is_real=state.enterprise_search.available,
     )
     if demo is not None:
-        _attach_reply_audio(demo)
+        attach_reply_audio(demo)
         return demo
     req = AgentDecideRequest(
         user_id=SHOWCASE_USER_ID,
@@ -629,20 +587,11 @@ def showcase_chat(payload: dict, background_tasks: BackgroundTasks):
     )
     if state.enterprise_search.available and showcase_skills.is_intranet_quick(request_text):
         response = state.agent_runtime.run_neisou(req)
-        _attach_reply_audio(response)
+        attach_reply_audio(response)
         return response
-    response = _run_agent_decide(req, background_tasks)
-    _attach_reply_audio(response)
+    response = run_agent_decide(req, background_tasks)
+    attach_reply_audio(response)
     return response
-
-
-def _attach_reply_audio(response: AgentDecideResponse) -> None:
-    """Synthesize the spoken reply — but only when no real audio track is
-    about to play. A response with `asset` already set (play_asset, a
-    synchronous remix) has its own audio starting immediately; speaking the
-    "here's your track" reply over it means two tracks play at once."""
-    if response.reply and response.asset is None:
-        response.reply_audio_url = _reply_audio_url(response.reply)
 
 
 @app.get("/showcase/skills")
@@ -933,14 +882,6 @@ def _run_generation_job_safely(job_id: str, user_id: str, request: GenerationReq
             return None
 
 
-NOTIFY_LINE_TEXT = "刚刚你想听的音频生成完成了，现在来听听吧"
-
-
-def _notify_audio_url() -> str | None:
-    """兜底播报语音。文案固定 → 首次合成后按文本哈希永久缓存，之后零延迟。"""
-    return _reply_audio_url(NOTIFY_LINE_TEXT)
-
-
 def _job_done_notifier(user_id: str, job_id: str):
     """executor future 的 done-callback（跑在生成线程里）：任务成功时把
     generation_done 推给该用户在线的「打电话」连接。没有连接就静默——
@@ -958,7 +899,7 @@ def _job_done_notifier(user_id: str, job_id: str):
                     "type": "generation_done",
                     "jobId": job_id,
                     "audio": _audio_item(job.asset),
-                    "notifyAudioUrl": _notify_audio_url(),
+                    "notifyAudioUrl": notify_audio_url(),
                 },
             )
         except Exception:  # noqa: BLE001 — 通知失败绝不能影响任务本身
@@ -983,9 +924,9 @@ def voice_intent(payload: VoiceIntentIn):
     text = payload.text.strip()
     if len(text) < 2:
         reply = "我没听清楚，能再说一遍吗?"
-        return {"action": "no_match", "reply": reply, "replyAudioUrl": _reply_audio_url(reply), "audio": None, **echo}
+        return {"action": "no_match", "reply": reply, "replyAudioUrl": reply_audio_url(reply), "audio": None, **echo}
 
-    _ensure_demo_profile(payload.user_id)
+    ensure_demo_profile(payload.user_id)
     try:
         response = state.agent_runtime.run(
             AgentDecideRequest(
@@ -997,12 +938,12 @@ def voice_intent(payload: VoiceIntentIn):
         )
     except BudgetExceededError:
         reply = "今天为你做的新音频已经不少啦，先听听已经做好的，明天再来找我做新的好吗？"
-        return {"action": "no_match", "reply": reply, "replyAudioUrl": _reply_audio_url(reply), "audio": None, **echo}
+        return {"action": "no_match", "reply": reply, "replyAudioUrl": reply_audio_url(reply), "audio": None, **echo}
 
     # Pure conversation turn — the agent chatted, nothing to play.
     if response.action == "chat":
         reply = response.reply or "我在呢，想聊什么都可以。"
-        return {"action": "chat", "reply": reply, "replyAudioUrl": _reply_audio_url(reply), "audio": None, **echo}
+        return {"action": "chat", "reply": reply, "replyAudioUrl": reply_audio_url(reply), "audio": None, **echo}
 
     asset = response.asset
     if response.action == "generate_job" and response.job_id:
@@ -1019,22 +960,22 @@ def voice_intent(payload: VoiceIntentIn):
         return {
             "action": "generate_job",
             "reply": reply,
-            "replyAudioUrl": _reply_audio_url(reply),
+            "replyAudioUrl": reply_audio_url(reply),
             "audio": None,
             "job_id": response.job_id,
-            "notify_audio_url": _notify_audio_url(),
+            "notify_audio_url": notify_audio_url(),
             **echo,
         }
 
     if asset is not None:
         reply = response.reply or f"我给你找了一段适合现在听的音频：《{asset.title}》。"
-        return {"action": "play_asset", "reply": reply, "replyAudioUrl": _reply_audio_url(reply), "audio": _audio_item(asset), **echo}
+        return {"action": "play_asset", "reply": reply, "replyAudioUrl": reply_audio_url(reply), "audio": _audio_item(asset), **echo}
 
     no_match_reply = response.reply or "暂时没有找到合适的内容，换个说法再试试？"
     return {
         "action": "no_match",
         "reply": no_match_reply,
-        "replyAudioUrl": _reply_audio_url(no_match_reply),
+        "replyAudioUrl": reply_audio_url(no_match_reply),
         "audio": None,
         **echo,
     }
@@ -1326,13 +1267,13 @@ def _generation_task_view(job_id: str) -> dict:
     view = {"id": job.id, "status": status, "message": message, "audio": audio}
     if status == "Success":
         # 兜底播报语音（固定文案，永久缓存）——客户端先播这句再自动播放 audio
-        view["notify_audio_url"] = _notify_audio_url()
+        view["notify_audio_url"] = notify_audio_url()
     return view
 
 
 @app.post("/v1/generation-tasks")
 def mobile_create_generation_task(payload: MobileGenerationTaskIn, background_tasks: BackgroundTasks):
-    _ensure_demo_profile(_MOBILE_DEFAULT_USER)
+    ensure_demo_profile(_MOBILE_DEFAULT_USER)
     request = GenerationRequest(request_text=payload.prompt)
     try:
         response = state.generation_service.enqueue_or_match(_MOBILE_DEFAULT_USER, request)
@@ -1466,37 +1407,6 @@ def mobile_upload_noop(user_id: str, upload_id: str):
     return _upload_item(asset)
 
 
-def _reply_audio_url(reply: str) -> str | None:
-    """Synthesize the agent's spoken reply (MiniMax TTS), cached by reply text.
-
-    Best-effort: any failure falls back to text-only. Short replies (≤40 chars)
-    cost ~$0.002 and ~1-2s; repeated phrasings hit the file cache."""
-    text = (reply or "").strip()
-    if not text:
-        return None
-    provider = state.generation_service.provider
-    if not hasattr(provider, "generate_text_to_file"):
-        return None  # local tone provider — no real voice
-    import hashlib
-    digest = hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
-    object_key = f"replies/{digest}.mp3"
-    try:
-        path = state.storage.path_for(object_key)
-        if not path.exists():
-            # Hard 5s wall-clock budget: a hung MiniMax call must never stall a
-            # chat turn. The abandoned worker (capped by its own 8s socket
-            # timeout) may still finish and warm the cache for next time.
-            future = _reply_tts_executor.submit(
-                provider.generate_text_to_file,
-                text, path, object_key,
-                voice_style="warm_female", title="floppy_reply", timeout=8,
-            )
-            future.result(timeout=5)
-        return state.storage.public_url(object_key)
-    except Exception:  # noqa: BLE001 — voice reply is an enhancement, never a blocker
-        return None
-
-
 @dataclass
 class _RealtimeConn:
     """一个在线的「打电话」连接。注册表按 user_id 存最后一个连接（后连的赢）。"""
@@ -1547,7 +1457,7 @@ async def _maybe_dispatch_audio_intent(conn: _RealtimeConn, text: str) -> None:
     conn.intent_inflight = True
     try:
         # 通话用户可能从没建过画像 —— decide 里的 _profile_context 会直接抛错
-        await asyncio.to_thread(_ensure_demo_profile, conn.user_id)
+        await asyncio.to_thread(ensure_demo_profile, conn.user_id)
         response = await asyncio.to_thread(
             state.agent_runtime.run,
             AgentDecideRequest(user_id=conn.user_id, request_text=text, generation_allowed=True),
@@ -1559,7 +1469,7 @@ async def _maybe_dispatch_audio_intent(conn: _RealtimeConn, text: str) -> None:
                 "type": "generation_done",
                 "jobId": None,
                 "audio": _audio_item(response.asset),
-                "notifyAudioUrl": await asyncio.to_thread(_notify_audio_url),
+                "notifyAudioUrl": await asyncio.to_thread(notify_audio_url),
             }
             await conn.websocket.send_text(json.dumps(payload, ensure_ascii=False))
         elif response.action == "generate_job" and response.job_id:

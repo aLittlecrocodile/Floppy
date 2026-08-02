@@ -3,8 +3,9 @@ from __future__ import annotations
 from fastapi.testclient import TestClient
 
 from floppy_backend.config import get_settings
-from floppy_backend.main import _attach_reply_audio, app
+from floppy_backend.main import app
 from floppy_backend.models import AgentDecideResponse
+from floppy_backend.services.reply_audio import attach_reply_audio
 
 
 def _configure_tmp_app(monkeypatch, tmp_path) -> None:
@@ -112,18 +113,18 @@ def test_attach_reply_audio_skips_tts_when_asset_already_plays(monkeypatch):
     synchronous remix) must not also get a spoken reply_audio_url — both
     would start playing at once. The test env's audio provider has no TTS
     support either way, so this pins the *decision*, not just the output."""
-    import floppy_backend.main as main_module
+    import floppy_backend.services.reply_audio as reply_audio_module
 
     calls: list[str] = []
-    monkeypatch.setattr(main_module, "_reply_audio_url", lambda text: calls.append(text) or "http://fake/reply.mp3")
+    monkeypatch.setattr(reply_audio_module, "reply_audio_url", lambda text: calls.append(text) or "http://fake/reply.mp3")
 
     with_asset = AgentDecideResponse.model_construct(reply="给你放一段《雨声》", asset=object())
-    _attach_reply_audio(with_asset)
+    attach_reply_audio(with_asset)
     assert with_asset.reply_audio_url is None
     assert calls == []
 
     without_asset = AgentDecideResponse.model_construct(reply="我在呢，想聊什么都可以。", asset=None)
-    _attach_reply_audio(without_asset)
+    attach_reply_audio(without_asset)
     assert without_asset.reply_audio_url == "http://fake/reply.mp3"
     assert calls == ["我在呢，想聊什么都可以。"]
 
