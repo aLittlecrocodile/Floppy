@@ -5,7 +5,7 @@
 > 可直接照搬。
 >
 > Base URL：本地 `http://127.0.0.1:8000`；上云后换成后端给的公网地址（HTTPS 优先）。
-> 所有请求/响应均为 `application/json; charset=utf-8`。当前 MVP 无登录鉴权，`user_id` 自定义传入。
+> 所有请求/响应均为 `application/json; charset=utf-8`。当前无登录鉴权，`user_id` 自定义传入。
 
 ---
 

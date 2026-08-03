@@ -1,1 +1,1 @@
-"""Floppy backend MVP package."""
+"""Floppy backend package."""

@@ -82,7 +82,7 @@ logger = logging.getLogger("floppy")
 logger.info("logging initialised -> %s", _LOG_FILE)
 
 
-app = FastAPI(title="Floppy Backend MVP", version="0.1.0", lifespan=lifespan)
+app = FastAPI(title="Floppy Backend", version="0.1.0", lifespan=lifespan)
 
 
 class _RequestBaseURLMiddleware:

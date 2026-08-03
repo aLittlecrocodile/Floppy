@@ -2,7 +2,7 @@
 
 > Base URL（当前联调）：`http://172.22.159.11:8000`（后端开发机 LAN 地址，手机需与其在同一 Wi-Fi）
 > 上公网 / 换网络后 Base URL 会变，以后端同学通知为准；音频 `streamUrl` 由后端按当前 Base URL 生成，前端不要自己拼。
-> 编码：`application/json; charset=utf-8`；MVP 无鉴权，`user_id` 由客户端本地生成并保持稳定。
+> 编码：`application/json; charset=utf-8`；无鉴权，`user_id` 由客户端本地生成并保持稳定。
 
 以下 4 个接口均已实现并联调通过。
 

@@ -5,7 +5,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    app_name: str = "Floppy Backend MVP"
+    app_name: str = "Floppy Backend"
     database_path: Path = Path("data/floppy.db")
     storage_dir: Path = Path("storage/audio")
     public_base_url: str = "http://127.0.0.1:8000"

@@ -4,7 +4,7 @@
 > Base URL（本地）：`http://127.0.0.1:8000`（如用其它端口启动则替换；上云后替换为公网地址）
 > 实时语音对话另见 WebSocket 文档：`docs/contracts/voice_dialog_ws.md`
 > 编码：请求与响应均为 `application/json; charset=utf-8`
-> 鉴权：当前 MVP 无鉴权，`user_id` 由前端在路径中传入
+> 鉴权：当前无鉴权，`user_id` 由前端在路径中传入
 
 ---
 
@@ -50,7 +50,7 @@
 响应：
 
 ```json
-{ "status": "ok", "app": "Floppy Backend MVP" }
+{ "status": "ok", "app": "Floppy Backend" }
 ```
 
 ### POST `/admin/seed`

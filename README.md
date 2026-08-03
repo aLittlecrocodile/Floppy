@@ -1,4 +1,4 @@
-# Floppy · Backend MVP
+# Floppy
 
 Floppy 是面向高压研发团队的 AI 原生减压陪伴工具，让大家的压力小一点。当前仓库同时包含后端能力、体验页和部署配置：
 
@@ -146,11 +146,12 @@ export FLOPPY_MINIMAX_ENABLE_MUSIC_MIX=true
 
 ## Engineering Notes
 
-当前 MVP 使用标准库 `sqlite3`，避免早期引入重 ORM。模块边界按未来服务拆分设计：
+使用标准库 `sqlite3`，避免引入重 ORM。模块边界按未来服务拆分设计：
 
 - `floppy_backend.repositories`：数据访问。
 - `floppy_backend.services.profile`：用户画像。
-- `floppy_backend.services.recommendation`：推荐召回和排序。
+- `floppy_backend.services.library`：音频库召回和匹配。
+- `floppy_backend.services.hermes_agent`：Agent 决策运行时。
 - `floppy_backend.services.generation`：缓存命中、生成任务、入库。
 - `floppy_backend.services.script`：睡前脚本生成、停顿标记和脚本 hash。
 - `floppy_backend.providers.audio`：音频生成 provider 抽象。
